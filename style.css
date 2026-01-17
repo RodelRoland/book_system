@@ -1,149 +1,374 @@
-/* ===== GENERAL ===== */
-body {
-    font-family: Arial, Helvetica, sans-serif;
-    background-color: #f4f4f6;
+/* ===== RESET & BASE ===== */
+* {
     margin: 0;
-    padding: 20px;
-    color: #222222;
+    padding: 0;
+    box-sizing: border-box;
 }
 
-h2, h3 {
-    margin-top: 0;
-    color: #3b1a5a; /* INFOTESS purple */
+body {
+    font-family: -apple-system, BlinkMacOSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    background-color: #f8f9fa;
+    color: #333;
+    line-height: 1.5;
 }
 
-a {
-    text-decoration: none;
-    color: #3b1a5a;
-}
-
-a:hover {
-    text-decoration: underline;
-}
-
-/* ===== CONTAINER ===== */
+/* ===== LAYOUT (MOBILE FIRST) ===== */
 .container {
     background: #ffffff;
-    padding: 20px;
-    border-radius: 6px;
-    max-width: 1100px;
-    margin: auto;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    min-height: 100vh;
+    padding: 50px 14px;
 }
 
-hr {
-    border: none;
-    border-top: 1px solid #ddd;
-    margin: 20px 0;
+/* ===== HEADINGS ===== */
+h2 {
+    font-size: 1.45rem;
+    font-weight: 700;
+    color: #076b66;
+    margin-bottom: 1.2rem;
+    text-align: center;
 }
 
-/* ===== FORMS ===== */
+h3 {
+    font-size: 1.2rem;
+    font-weight: 600;
+    color: #046e68;
+    margin: 1.6rem 0 0.8rem;
+}
+
+/* ===== FORM ELEMENTS ===== */
 label {
     display: block;
-    margin-top: 10px;
-    font-weight: bold;
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: #444;
+    margin-bottom: 0.4rem;
+    margin-top: 1.2rem;
 }
 
 input[type="text"],
 input[type="number"],
-select {
+input[type="tel"] {
     width: 100%;
-    max-width: 400px;
-    padding: 8px;
-    margin-top: 5px;
-    border: 1px solid #ccc;
-    border-radius: 4px;
+    padding: 12px 14px;
+    font-size: 0.95rem;
+    border: 1px solid #23c7be;
+    border-radius: 8px;
+    background: #fff;
 }
 
-button {
-    padding: 8px 18px;
+input[type="text"]:focus,
+input[type="number"]:focus,
+input[type="tel"]:focus {
+    outline: none;
+    border-color: #6b46c1;
+    box-shadow: 0 0 0 3px rgba(107, 70, 193, 0.12);
+}
+
+hr {
     border: none;
-    border-radius: 4px;
-    background-color: #3b1a5a; /* Purple */
-    color: #ffffff;
-    cursor: pointer;
-    font-weight: bold;
+    border-top: 1px solid #e5e7eb;
+    margin: 1.4rem 0;
 }
 
-button:hover {
-    background-color: #2c1344;
+/* ===== CHECKBOXES ===== */
+.book-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 5px;
+    padding: 5px 0;
+    font-size: 0.95rem;
 }
 
-/* ===== TABLES ===== */
-table {
+.book-check {
+    width: 18px;
+    height: 18px;
+    margin-top: 2px;
+    accent-color: #6b46c1;
+}
+
+.book-title {
+    color: #1f2937;
+}
+
+/* ===== TOTALS ===== */
+.total-line {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.95rem;
+    margin: 0.6rem 0;
+}
+
+.final-total {
+    display: flex;
+    justify-content: space-between;
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: #111827;
+    margin-top: 0.9rem;
+    padding-top: 0.9rem;
+    border-top: 2px solid #e5e7eb;
+}
+
+/* ===== BUTTON ===== */
+button[type="submit"] {
     width: 100%;
-    border-collapse: collapse;
-    background: #ffffff;
+    padding: 14px;
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: white;
+    background: #6b46c1;
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    margin-top: 1.2rem;
 }
 
-th {
-    background-color: #3b1a5a; /* Purple */
-    color: #ffffff;
-    padding: 10px;
-    text-align: left;
+button[type="submit"]:active {
+    background: #4c1d95;
 }
 
-td {
-    padding: 8px;
-    border-bottom: 1px solid #ddd;
-}
-
-tr:nth-child(even) {
-    background-color: #f9f9fb;
-}
-
-/* ===== STATUS INDICATORS ===== */
-.status-paid {
-    color: #2e7d32; /* Green */
-    font-weight: bold;
-}
-
-.status-unpaid {
-    color: #c4161c; /* Red from logo */
-    font-weight: bold;
-}
-
-.status-given {
-    color: #2e7d32;
-    font-weight: bold;
-}
-
-.status-pending {
-    color: #c4161c;
+/* ===== EMPTY STATE ===== */
+.empty-state {
+    text-align: center;
+    color: #6b7280;
     font-style: italic;
+    padding: 1.5rem 1rem;
+    background: #f1f5f9;
+    border-radius: 10px;
+    margin: 1.2rem 0;
 }
 
-/* ===== ALERTS ===== */
-.success {
-    color: #2e7d32;
+/* ── MULTI-STEP FORM ────────────────────────────────────────────── */
+
+.form-step {
+    display: none;
+}
+
+.form-step.active {
+    display: block;
+}
+
+.step-header {
+    display: flex;
+    align-items: center;
+    align-content: center;
+    gap: 8px;
+}
+
+.step-header h3 {
+    margin-bottom: 1.3rem;
+}
+
+
+.step-number {
+    width: 28px;
+    height: 28px;
+    background: #6b46c1;
+    color: white;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     font-weight: bold;
+    font-size: 1.1rem;
 }
 
-.warning {
-    color: #c4161c;
-    font-weight: bold;
+.required {
+    color: #e11d48;
+    font-size: 0.9rem;
 }
 
-/* ===== SPECIAL ACTIONS ===== */
-.danger-button {
-    background-color: #c4161c;
+.primary-btn {
+    width: 100%;
+    padding: 14px;
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: white;
+    background: #6b46c1;
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    margin-top: 1.4rem;
 }
 
-.danger-button:hover {
-    background-color: #9e1116;
+.primary-btn:active {
+    background: #4c1d95;
 }
 
-/* ===== MOBILE RESPONSIVE ===== */
-@media (max-width: 768px) {
-    table {
-        font-size: 14px;
+.secondary-btn {
+    width: 30%;
+    padding: 8px;
+    font-size: 1rem;
+    font-weight: 500;
+    color: #4b5563;
+    background: #d2dff6;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    cursor: pointer;
+    margin-bottom: 1.4rem;
+    transition: background 0.25s ease, transform 0.25s ease;
+
+}
+
+.secondary-btn:hover {
+    background: #8d5bda;
+}
+
+.step-info {
+    font-size: 0.85rem;
+    color: #6b7280;
+    text-align: center;
+    margin-top: 1rem;
+}
+
+.totals-divider {
+    margin: 1.6rem 0;
+}
+
+/* ── PAYMENT INSTRUCTIONS PAGE (COMPACT) ───────────────────────── */
+
+.payment-card {
+    background: #ffffff;
+    border-radius: 10px;
+    padding: 1.1rem 1rem;
+    border: 1px solid #e5e7eb;
+}
+
+.amount-summary {
+    background: #f8fafc;
+    padding: 0.9rem;
+    border-radius: 8px;
+    margin-bottom: 0.9rem;
+}
+
+.final-amount {
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: #111827;
+    margin-top: 0.2rem;
+}
+
+.payment-details {
+    margin: 1rem 0;
+}
+
+.payment-details h4 {
+    font-size: 1rem;
+    color: #374151;
+    margin-bottom: 0.6rem;
+}
+
+.detail-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.55rem 0;
+    border-bottom: 1px solid #f1f5f9;
+}
+
+.detail-row:last-child {
+    border-bottom: none;
+}
+
+.label {
+    color: #4b5563;
+    font-weight: 500;
+    font-size: 0.9rem;
+}
+
+.value {
+    font-weight: 600;
+    color: #1f2937;
+    text-align: right;
+    font-size: 0.9rem;
+}
+
+.value.highlight {
+    color: #6b46c1;
+    font-weight: 700;
+}
+
+.instruction-box {
+    background: #fefce8;
+    border-left: 4px solid #ca8a04;
+    padding: 0.8rem 0.9rem;
+    border-radius: 6px;
+    margin: 1rem 0;
+    font-size: 0.85rem;
+    color: #713f12;
+}
+
+.instruction-box p {
+    margin: 0.35rem 0;
+}
+
+.instruction-box strong {
+    color: #92400e;
+}
+
+.thank-you {
+    text-align: center;
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: #374151;
+    margin-top: 1.2rem;
+    padding-top: 0.7rem;
+    border-top: 1px solid #e5e7eb;
+}
+
+.cls-btn {
+    position: absolute;
+    top: 2px;
+    right: 5px;
+    text-align: center;
+    width: 15%;
+    padding: 4px;
+    font-size: 1rem;
+    font-weight: 400;
+    color: #6c6666;
+    background: #f5b7c3;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    margin-top: 1rem;
+}
+
+/* Tablet / Desktop */
+@media (min-width: 640px) {
+    .payment-card {
+        max-width: 480px;
+        margin: 0 auto;
+        padding: 1.4rem 1.5rem;
+    }
+}
+
+
+/* ===== TABLET ===== */
+@media (min-width: 640px) {
+    .container {
+        padding: 28px 24px;
     }
 
-    th, td {
-        padding: 6px;
+    h2 {
+        font-size: 1.75rem;
     }
 
-    input, select {
-        max-width: 100%;
+    .total-line {
+        font-size: 1rem;
+    }
+}
+
+/* ===== DESKTOP / LAPTOP ===== */
+@media (min-width: 1024px) {
+    .container {
+        max-width: 520px;
+        margin: 0 auto;
+        padding: 40px 32px;
+        border-radius: 14px;
+        box-shadow: 0 10px 25px rgba(0, 0, 0, 0.06);
+    }
+
+    h2 {
+        font-size: 2rem;
     }
 }
