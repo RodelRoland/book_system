@@ -52,12 +52,11 @@ $books = $conn->query("
                     required
             >
 
-            <label for="phone">Phone Number <span class="required">*</span></label>
+            <label for="phone">Phone Number </label>
             <input
                     type="tel"
                     id="phone"
                     name="phone"
-                    required
             >
 
             <button type="button" id="btnToStep2" class="primary-btn">
