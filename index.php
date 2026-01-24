@@ -203,4 +203,35 @@ $books = $conn->query("
 </script>
 
 </body>
+
+<script>
+document.querySelector('input[name="index_number"]').addEventListener('blur', function() {
+    const indexNumber = this.value;
+    if (indexNumber.length < 3) return; // Don't check empty or too short values
+
+    fetch('check_student_books.php?index=' + indexNumber)
+        .then(response => response.json())
+        .then(ownedBooks => {
+            // Re-enable all first to reset the form
+            document.querySelectorAll('input[name="books[]"]').forEach(checkbox => {
+                checkbox.disabled = false;
+                checkbox.parentElement.style.opacity = "1";
+                checkbox.parentElement.title = "";
+            });
+
+            // Disable books the student already owns
+            ownedBooks.forEach(bookId => {
+                const checkbox = document.querySelector(`input[name="books[]"][value="${bookId}"]`);
+                if (checkbox) {
+                    checkbox.disabled = true;
+                    checkbox.checked = false; // Uncheck it if they tried to select it before typing index
+                    checkbox.parentElement.style.opacity = "0.5";
+                    checkbox.parentElement.style.textDecoration = "line-through";
+                    checkbox.parentElement.title = "You have already requested this book.";
+                }
+            });
+        });
+});
+</script>
+
 </html>
