@@ -201,6 +201,36 @@ $books = $conn->query("
     });
 </script>
 
+<script>
+document.getElementById('index_number').addEventListener('blur', function() {
+    var indexNum = this.value;
+    var nameInput = document.getElementById('full_name');
+
+    if (indexNum.length > 0) {
+        // We use the same helper file we created earlier
+        fetch('get_student_name.php', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: 'index_number=' + encodeURIComponent(indexNum)
+        })
+        .then(response => response.text())
+        .then(data => {
+            // This cleans up the response and puts it in the name box
+            nameInput.value = data.trim();
+            
+            if(data.trim() === "Student Not Found") {
+                nameInput.style.color = "#d63031"; // Red for error
+            } else {
+                nameInput.style.color = "#2d3436"; // Normal color
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+        });
+    }
+});
+</script>
+
 </body>
 
 <script>
