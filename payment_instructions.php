@@ -11,7 +11,7 @@ if (!isset($_GET['request_id'])) {
 $request_id = intval($_GET['request_id']);
 
 $query = $conn->query("
-    SELECT r.total_amount, s.index_number, s.full_name
+    SELECT r.total_amount, r.amount_paid, r.payment_status, s.index_number, s.full_name, s.credit_balance
     FROM requests r
     JOIN students s ON r.student_id = s.student_id
     WHERE r.request_id = $request_id
@@ -23,9 +23,12 @@ if (!$query || $query->num_rows === 0) {
 
 $data = $query->fetch_assoc();
 
-$subtotal    = (float) $data['total_amount'];
-$momo_charge = $subtotal * 0.01;
-$final_amount = $subtotal + $momo_charge;
+$subtotal      = (float) $data['total_amount'];
+$credit_used   = (float) $data['amount_paid'];
+$remaining     = $subtotal - $credit_used;
+$momo_charge   = $remaining * 0.01;
+$final_amount  = $remaining + $momo_charge;
+$is_paid       = $data['payment_status'] === 'paid';
 ?>
 
 <!DOCTYPE html>
@@ -55,6 +58,17 @@ $final_amount = $subtotal + $momo_charge;
                 <span>Subtotal</span>
                 <strong>GH₵ <?php echo number_format($subtotal, 2); ?></strong>
             </div>
+            <?php if ($credit_used > 0): ?>
+            <div class="total-line" style="color: #28a745;">
+                <span>Credit Applied</span>
+                <strong>- GH₵ <?php echo number_format($credit_used, 2); ?></strong>
+            </div>
+            <?php endif; ?>
+            <?php if (!$is_paid): ?>
+            <div class="total-line">
+                <span>Amount Due</span>
+                <strong>GH₵ <?php echo number_format($remaining, 2); ?></strong>
+            </div>
             <div class="total-line">
                 <span>MoMo Charge (1%)</span>
                 <strong>GH₵ <?php echo number_format($momo_charge, 2); ?></strong>
@@ -63,10 +77,17 @@ $final_amount = $subtotal + $momo_charge;
                 Total to Pay
                 <div class="final-amount">GH₵ <?php echo number_format($final_amount, 2); ?></div>
             </div>
+            <?php else: ?>
+            <div class="final-total" style="background: #d4edda; color: #155724;">
+                <strong>FULLY PAID</strong>
+                <div style="font-size: 14px;">Your credit covered the entire amount!</div>
+            </div>
+            <?php endif; ?>
         </div>
 
         <hr class="totals-divider">
 
+        <?php if (!$is_paid): ?>
         <div class="payment-details">
             <h4>Pay To:</h4>
             <div class="detail-row">
@@ -88,6 +109,13 @@ $final_amount = $subtotal + $momo_charge;
             <p>Please make the exact payment using Mobile Money and use your Index Number as the reference.</p>
             <p>After payment, wait for confirmation from the course representative. You will be notified once your books are ready for collection.</p>
         </div>
+        <?php else: ?>
+        <div class="instruction-box" style="background: #d4edda; border-color: #28a745;">
+            <p><strong>No Payment Required!</strong></p>
+            <p>Your existing credit balance has covered the full cost of this order.</p>
+            <p>Please collect your books from the course representative.</p>
+        </div>
+        <?php endif; ?>
 
         <p class="thank-you">Thank you for your purchase!</p>
 

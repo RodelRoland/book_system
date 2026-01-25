@@ -39,19 +39,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $error = "Duplicate Request: Student has already received: " . implode(", ", $duplicate_titles);
         } else {
             // Save/Update student details
-            $conn->query("INSERT INTO students (index_number, full_name, phone) 
-                          VALUES ('$index_number', '$full_name', '$phone') 
+            $conn->query("INSERT INTO students (index_number, full_name, phone, credit_balance) 
+                          VALUES ('$index_number', '$full_name', '$phone', 0) 
                           ON DUPLICATE KEY UPDATE full_name='$full_name', phone='$phone'");
             
-            $student_id_res = $conn->query("SELECT student_id FROM students WHERE index_number = '$index_number'");
-            $student_id = $student_id_res->fetch_assoc()['student_id'];
+            $student_id_res = $conn->query("SELECT student_id, credit_balance FROM students WHERE index_number = '$index_number'");
+            $student_data = $student_id_res->fetch_assoc();
+            $student_id = $student_data['student_id'];
+            $existing_credit = floatval($student_data['credit_balance']);
 
             $ids = implode(',', array_map('intval', $selected_books));
             $price_res = $conn->query("SELECT SUM(price) as total FROM books WHERE book_id IN ($ids)");
-            $total_amount = $price_res->fetch_assoc()['total'];
+            $total_amount = floatval($price_res->fetch_assoc()['total']);
+
+            // Calculate payment: existing credit + cash received
+            $total_payment = $existing_credit + $cash_received;
+            
+            if ($total_payment >= $total_amount) {
+                // Overpayment goes to credit balance
+                $new_credit = $total_payment - $total_amount;
+                $amount_paid = $total_amount;
+            } else {
+                // Underpayment (shouldn't happen for manual orders, but handle it)
+                $new_credit = 0;
+                $amount_paid = $total_payment;
+            }
+            
+            // Update student's credit balance
+            $conn->query("UPDATE students SET credit_balance = $new_credit WHERE student_id = $student_id");
 
             $sql_request = "INSERT INTO requests (student_id, total_amount, amount_paid, payment_status, created_at) 
-                            VALUES ('$student_id', '$total_amount', '$cash_received', 'paid', NOW())";
+                            VALUES ('$student_id', '$total_amount', '$amount_paid', 'paid', NOW())";
             
             if ($conn->query($sql_request)) {
                 $request_id = $conn->insert_id;
@@ -59,7 +77,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $book_id = intval($book_id);
                     $conn->query("INSERT INTO request_items (request_id, book_id) VALUES ('$request_id', '$book_id')");
                 }
-                header("Location: view_request.php?msg=manual_success");
+                
+                // Show success message with credit info if applicable
+                $msg = "manual_success";
+                if ($new_credit > 0) {
+                    $msg .= "&credit=" . $new_credit;
+                }
+                header("Location: view_request.php?msg=$msg");
                 exit;
             } else {
                 $error = "Database Error: " . $conn->error;
@@ -72,102 +96,258 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 ?>
 
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Manual Order Entry</title>
-    <link rel="stylesheet" href="style.css">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Manual Order</title>
     <style>
-            body { font-family: 'Segoe UI', sans-serif; background-color: #f0f2f5; padding: 20px; }
-        .container { max-width: 500px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
-        .back-link { display: inline-block; margin-bottom: 15px; text-decoration: none; color: #007bff; font-weight: 600; font-size: 14px; }
-
-        /* Fixed section: added display block and increased margin */
-        .input-field { 
-            width: 100%; 
-            padding: 12px; 
-            margin-bottom: 20px; 
-            display: block; 
-            border: 1px solid #ccc; 
-            border-radius: 8px; 
-            box-sizing: border-box; 
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            background: linear-gradient(135deg, #f5f7fa 0%, #e4e8ec 100%);
+            min-height: 100vh;
+            padding: 30px 20px;
         }
-
-        h4 { margin: 15px 0 8px 0; font-size: 16px; color: #333; }
-        .book-container { max-height: 200px; overflow-y: auto; border: 1px solid #eee; padding: 10px; border-radius: 8px; background: #fafafa; margin-bottom: 15px; }
-        .book-item { padding: 5px 0; font-size: 14px; border-bottom: 1px solid #f0f0f0; }
-        .summary-box { background: #e8f4fd; padding: 15px; border-radius: 8px; margin-bottom: 15px; }
-        .cash-input { width: 100%; padding: 12px; border: 2px solid #28a745; border-radius: 8px; font-size: 18px; font-weight: bold; box-sizing: border-box; }
-        .primary-btn { width: 100%; padding: 14px; background: #28a745; color: white; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; margin-top: 10px; }
-        .error-box { background: #ffe3e3; color: #d63031; padding: 12px; border: 1px solid #ff0000; border-radius: 8px; margin-bottom: 15px; font-size: 14px; }
+        
+        .page-container { max-width: 550px; margin: 0 auto; }
+        
+        .page-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 25px 30px;
+            border-radius: 16px;
+            margin-bottom: 25px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 10px 30px rgba(102, 126, 234, 0.3);
+        }
+        .page-header h1 { font-size: 22px; font-weight: 600; }
+        .page-header .subtitle { opacity: 0.9; margin-top: 3px; font-size: 13px; }
+        .back-btn {
+            background: rgba(255,255,255,0.2);
+            color: white;
+            padding: 10px 20px;
+            border-radius: 8px;
+            text-decoration: none;
+            font-weight: 600;
+            transition: all 0.3s;
+            border: 1px solid rgba(255,255,255,0.3);
+            font-size: 14px;
+        }
+        .back-btn:hover { background: rgba(255,255,255,0.3); }
+        
+        .card {
+            background: white;
+            border-radius: 16px;
+            padding: 30px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+        }
+        
+        .error-box {
+            background: #ffebee;
+            color: #c62828;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            font-size: 14px;
+            border-left: 4px solid #f44336;
+        }
+        
+        .form-group { margin-bottom: 20px; }
+        .form-group label {
+            display: block;
+            font-weight: 600;
+            color: #555;
+            margin-bottom: 8px;
+            font-size: 14px;
+        }
+        .form-input {
+            width: 100%;
+            padding: 14px 16px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 15px;
+            transition: all 0.3s;
+        }
+        .form-input:focus { outline: none; border-color: #667eea; }
+        .form-input.valid { border-color: #28a745; background: #f8fff8; }
+        .form-input.readonly { background: #f8f9fa; color: #333; }
+        
+        .section-title {
+            font-size: 14px;
+            font-weight: 700;
+            color: #333;
+            margin-bottom: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .books-list {
+            max-height: 220px;
+            overflow-y: auto;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            margin-bottom: 20px;
+        }
+        .book-item {
+            padding: 14px 16px;
+            border-bottom: 1px solid #f0f0f0;
+            display: flex;
+            align-items: center;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .book-item:hover { background: #f8f9fa; }
+        .book-item:last-child { border-bottom: none; }
+        .book-item input[type="checkbox"] {
+            width: 20px;
+            height: 20px;
+            margin-right: 12px;
+            cursor: pointer;
+        }
+        .book-item .title { flex: 1; font-weight: 500; color: #333; }
+        .book-item .price { color: #667eea; font-weight: 700; }
+        
+        .summary-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+        }
+        .summary-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        .summary-row:last-child { margin-bottom: 0; }
+        .summary-label { font-size: 14px; opacity: 0.9; }
+        .summary-value { font-size: 28px; font-weight: 700; }
+        
+        .cash-input-group { margin-top: 15px; }
+        .cash-input-group label { color: rgba(255,255,255,0.9); margin-bottom: 8px; display: block; font-weight: 600; }
+        .cash-input {
+            width: 100%;
+            padding: 14px 16px;
+            border: 2px solid rgba(255,255,255,0.3);
+            border-radius: 10px;
+            font-size: 20px;
+            font-weight: 700;
+            background: rgba(255,255,255,0.15);
+            color: white;
+            text-align: center;
+        }
+        .cash-input::placeholder { color: rgba(255,255,255,0.5); }
+        .cash-input:focus { outline: none; border-color: white; background: rgba(255,255,255,0.25); }
+        
+        .btn-submit {
+            width: 100%;
+            padding: 16px;
+            background: #28a745;
+            color: white;
+            border: none;
+            border-radius: 12px;
+            font-size: 16px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.3s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+        .btn-submit:hover { background: #218838; transform: translateY(-2px); box-shadow: 0 5px 20px rgba(40,167,69,0.3); }
     </style>
 </head>
 <body>
-<div class="container">
-    <a href="admin.php" class="back-link">← Back to Dashboard</a>
-    <h2 style="margin-top: 0; color: #006064;">Manual Book Issue</h2>
 
-    <?php if (isset($error)): ?>
-        <div class="error-box"><strong>Error:</strong><br><?php echo $error; ?></div>
-    <?php endif; ?>
+<div class="page-container">
+    <div class="page-header">
+        <div>
+            <h1>➕ Manual Order</h1>
+            <p class="subtitle">Record cash payment & issue books</p>
+        </div>
+        <a href="admin.php" class="back-btn">← Back</a>
+    </div>
     
-    <form method="post" id="orderForm">
-        <input type="text" id="index_number" name="index_number" placeholder="Enter Index Number" required>
-
-        <input type="text" id="full_name" name="full_name" placeholder="Student Name" readonly>
+    <div class="card">
+        <?php if (isset($error)): ?>
+            <div class="error-box"><?php echo $error; ?></div>
+        <?php endif; ?>
         
-        <input type="text" name="phone" id="phone" class="input-field" placeholder="Phone Number (Optional)">
-        
-        <h4>Select Books:</h4>
-        <div class="book-container">
-            <?php if ($books_res && $books_res->num_rows > 0): ?>
-                <?php while($b = $books_res->fetch_assoc()): ?>
-                    <div class="book-item">
-                        <label style="cursor: pointer;">
+        <form method="post" id="orderForm">
+            <div class="form-group">
+                <label>Index Number</label>
+                <input type="text" id="index_number" name="index_number" class="form-input" placeholder="Enter student index number" required>
+            </div>
+            
+            <div class="form-group">
+                <label>Student Name</label>
+                <input type="text" id="full_name" name="full_name" class="form-input readonly" placeholder="Auto-filled from index" readonly>
+            </div>
+            
+            <div class="form-group">
+                <label>Phone (Optional)</label>
+                <input type="text" id="phone" name="phone" class="form-input" placeholder="Enter phone number">
+            </div>
+            
+            <div class="section-title">Select Books</div>
+            <div class="books-list">
+                <?php if ($books_res && $books_res->num_rows > 0): ?>
+                    <?php while($b = $books_res->fetch_assoc()): ?>
+                        <label class="book-item">
                             <input type="checkbox" name="books[]" class="book-checkbox" 
                                    data-price="<?php echo $b['price']; ?>" 
-                                   value="<?php echo $b['book_id']; ?>"> 
-                            <?php echo htmlspecialchars($b['book_title']); ?> 
-                            <span style="color:#666;">(GH₵<?php echo number_format($b['price'], 2); ?>)</span>
+                                   value="<?php echo $b['book_id']; ?>">
+                            <span class="title"><?php echo htmlspecialchars($b['book_title']); ?></span>
+                            <span class="price">GH₵ <?php echo number_format($b['price'], 2); ?></span>
                         </label>
-                    </div>
-                <?php endwhile; ?>
-            <?php endif; ?>
-        </div>
-
-        <div class="summary-box">
-            <div style="display:flex; justify-content: space-between; font-weight: bold; margin-bottom: 10px;">
-                <span>Total Amount:</span>
-                <span>GH₵ <span id="display_total">0.00</span></span>
+                    <?php endwhile; ?>
+                <?php else: ?>
+                    <div style="padding: 20px; text-align: center; color: #888;">No books available</div>
+                <?php endif; ?>
             </div>
-            <label style="font-size: 14px; font-weight: bold; display: block; margin-bottom: 5px;">Cash Received (GH₵):</label>
-            <input type="number" step="0.01" name="cash_received" id="cash_received" class="cash-input" placeholder="0.00" required>
-        </div>
-        
-        <button type="submit" class="primary-btn">Complete Transaction</button>
-    </form>
+            
+            <div class="summary-card">
+                <div class="summary-row">
+                    <span class="summary-label">Total Amount</span>
+                    <span class="summary-value">GH₵ <span id="display_total">0.00</span></span>
+                </div>
+                <div class="cash-input-group">
+                    <label>Cash Received</label>
+                    <input type="number" step="0.01" name="cash_received" id="cash_received" class="cash-input" placeholder="0.00" required>
+                </div>
+            </div>
+            
+            <button type="submit" class="btn-submit">✓ Complete Transaction</button>
+        </form>
+    </div>
 </div>
 
 <script>
-// 1. Logic to fetch student name by Index Number
 document.getElementById('index_number').addEventListener('blur', function() {
     const index = this.value;
     if (index.length > 2) {
-        fetch('get_student_details.php?index=' + index)
-            .then(response => response.json())
-            .then(data => {
-                if (data) {
-                    document.getElementById('full_name').value = data.full_name;
-                    document.getElementById('phone').value = data.phone ? data.phone : "";
-                    document.getElementById('index_number').style.borderColor = "#28a745";
-                } else {
-                    // Reset if index not found to allow new entry
-                    document.getElementById('index_number').style.borderColor = "#ccc";
-                }
-            });
+        fetch('get_student_credit.php?index=' + encodeURIComponent(index))
+        .then(response => response.json())
+        .then(data => {
+            const nameInput = document.getElementById('full_name');
+            const phoneInput = document.getElementById('phone');
+            if (data.found) {
+                nameInput.value = data.full_name;
+                nameInput.classList.add('valid');
+                if (data.phone) phoneInput.value = data.phone;
+            } else {
+                nameInput.value = '';
+                nameInput.classList.remove('valid');
+            }
+        });
     }
 });
 
-// 2. Logic to calculate Total Amount based on selected books
 const checkboxes = document.querySelectorAll('.book-checkbox');
 const displayTotal = document.getElementById('display_total');
 const cashInput = document.getElementById('cash_received');
@@ -175,45 +355,13 @@ const cashInput = document.getElementById('cash_received');
 function calculateTotal() {
     let total = 0;
     checkboxes.forEach(cb => {
-        if (cb.checked) {
-            total += parseFloat(cb.getAttribute('data-price'));
-        }
+        if (cb.checked) total += parseFloat(cb.getAttribute('data-price'));
     });
     displayTotal.innerText = total.toFixed(2);
-    // Auto-fill cash received with total for faster processing
     cashInput.value = total.toFixed(2);
 }
 
-checkboxes.forEach(cb => {
-    cb.addEventListener('change', calculateTotal);
-});
-</script>
-
-<script>
-document.getElementById('index_number').addEventListener('blur', function() {
-    var indexNum = this.value;
-    var nameInput = document.getElementById('full_name');
-
-    if (indexNum.length > 0) {
-        // Use Fetch API to get name from the database
-        fetch('get_student_name.php', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: 'index_number=' + encodeURIComponent(indexNum)
-        })
-        .then(response => response.text())
-        .then(data => {
-            nameInput.value = data;
-            
-            // Optional: Change text color if student is not found
-            if(data === "Student Not Found") {
-                nameInput.style.color = "red";
-            } else {
-                nameInput.style.color = "green";
-            }
-        });
-    }
-});
+checkboxes.forEach(cb => cb.addEventListener('change', calculateTotal));
 </script>
 
 </body>

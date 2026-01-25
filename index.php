@@ -59,6 +59,14 @@ $books = $conn->query("
                     name="phone"
             >
 
+            <div id="credit_info" style="display: none; background: #d4edda; border: 1px solid #28a745; padding: 12px; border-radius: 8px; margin: 15px 0;">
+                <strong style="color: #155724;">You have a credit balance!</strong>
+                <div style="font-size: 20px; color: #28a745; font-weight: bold; margin-top: 5px;">
+                    GH₵ <span id="credit_amount">0.00</span>
+                </div>
+                <small style="color: #155724;">This will be automatically applied to your next order.</small>
+            </div>
+
             <button type="button" id="btnToStep2" class="primary-btn">
                 Proceed
             </button>
@@ -205,23 +213,33 @@ $books = $conn->query("
 document.getElementById('index_number').addEventListener('blur', function() {
     var indexNum = this.value;
     var nameInput = document.getElementById('full_name');
+    var phoneInput = document.getElementById('phone');
+    var creditInfo = document.getElementById('credit_info');
+    var creditAmount = document.getElementById('credit_amount');
 
     if (indexNum.length > 0) {
-        // We use the same helper file we created earlier
-        fetch('get_student_name.php', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: 'index_number=' + encodeURIComponent(indexNum)
-        })
-        .then(response => response.text())
+        // Fetch student details including credit balance
+        fetch('get_student_credit.php?index=' + encodeURIComponent(indexNum))
+        .then(response => response.json())
         .then(data => {
-            // This cleans up the response and puts it in the name box
-            nameInput.value = data.trim();
-            
-            if(data.trim() === "Student Not Found") {
-                nameInput.style.color = "#d63031"; // Red for error
+            if (data.found) {
+                nameInput.value = data.full_name;
+                nameInput.style.color = "#2d3436";
+                if (data.phone) {
+                    phoneInput.value = data.phone;
+                }
+                
+                // Show credit balance if available
+                if (data.credit_balance > 0) {
+                    creditAmount.textContent = data.credit_balance.toFixed(2);
+                    creditInfo.style.display = 'block';
+                } else {
+                    creditInfo.style.display = 'none';
+                }
             } else {
-                nameInput.style.color = "#2d3436"; // Normal color
+                nameInput.value = "";
+                nameInput.style.color = "#2d3436";
+                creditInfo.style.display = 'none';
             }
         })
         .catch(error => {
@@ -230,8 +248,6 @@ document.getElementById('index_number').addEventListener('blur', function() {
     }
 });
 </script>
-
-</body>
 
 <script>
 document.querySelector('input[name="index_number"]').addEventListener('blur', function() {

@@ -1,18 +1,87 @@
 <?php
+session_start();
+if (!isset($_SESSION['admin_logged_in'])) {
+    header('Location: admin.php');
+    exit;
+}
 include 'db.php'; 
+
+// Create table to track returned balances (safe if already exists)
+$conn->query("CREATE TABLE IF NOT EXISTS balance_returns (
+    return_id INT AUTO_INCREMENT PRIMARY KEY,
+    student_id INT NOT NULL,
+    request_id INT NULL,
+    amount DECIMAL(10,2) NOT NULL,
+    return_date TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    notes VARCHAR(255) NULL,
+    INDEX idx_balance_returns_student (student_id),
+    INDEX idx_balance_returns_request (request_id)
+)");
+
+// Handle marking a balance as returned
+if (isset($_GET['return_balance'], $_GET['request_id'], $_GET['student_id'])) {
+    $request_id = intval($_GET['request_id']);
+    $student_id = intval($_GET['student_id']);
+
+    $req = $conn->query("SELECT total_amount, amount_paid FROM requests WHERE request_id = $request_id AND student_id = $student_id LIMIT 1");
+    $stu = $conn->query("SELECT credit_balance FROM students WHERE student_id = $student_id LIMIT 1");
+
+    if ($req && $stu && $req->num_rows === 1 && $stu->num_rows === 1) {
+        $req_row = $req->fetch_assoc();
+        $stu_row = $stu->fetch_assoc();
+
+        $overpaid = max(0, floatval($req_row['amount_paid']) - floatval($req_row['total_amount']));
+        $stored_credit = max(0, floatval($stu_row['credit_balance']));
+        $total_return = $overpaid + $stored_credit;
+
+        if ($total_return > 0) {
+            $conn->begin_transaction();
+            try {
+                if ($overpaid > 0) {
+                    $conn->query("UPDATE requests SET amount_paid = total_amount WHERE request_id = $request_id");
+                }
+                if ($stored_credit > 0) {
+                    $conn->query("UPDATE students SET credit_balance = 0 WHERE student_id = $student_id");
+                }
+                $amount_sql = number_format($total_return, 2, '.', '');
+                $conn->query("INSERT INTO balance_returns (student_id, request_id, amount, notes) VALUES ($student_id, $request_id, $amount_sql, 'Returned to student')");
+                $conn->commit();
+                header("Location: view_request.php?msg=returned&amount=$amount_sql");
+                exit;
+            } catch (Throwable $e) {
+                $conn->rollback();
+                header("Location: view_request.php?msg=return_failed");
+                exit;
+            }
+        }
+    }
+
+    header("Location: view_request.php?msg=return_failed");
+    exit;
+}
+
 
 // 1. Capture search input
 $search = isset($_GET['search']) ? $conn->real_escape_string($_GET['search']) : '';
 
 // 2. SQL Query
 $sql = "SELECT 
-            r.request_id, s.full_name, s.index_number, s.phone, 
+            r.request_id, r.student_id,
+            s.full_name, s.index_number, s.phone, s.credit_balance,
             r.total_amount, r.amount_paid, r.payment_status, r.created_at,
+            COALESCE(br.refunded_amount, 0) AS refunded_amount,
+            br.last_return_date,
             GROUP_CONCAT(CONCAT(ri.item_id, ':', b.book_title, ':', ri.is_collected) SEPARATOR '|') AS books_data
         FROM requests r
         JOIN students s ON r.student_id = s.student_id
         LEFT JOIN request_items ri ON r.request_id = ri.request_id
         LEFT JOIN books b ON ri.book_id = b.book_id
+        LEFT JOIN (
+            SELECT request_id, SUM(amount) AS refunded_amount, MAX(return_date) AS last_return_date
+            FROM balance_returns
+            WHERE request_id IS NOT NULL
+            GROUP BY request_id
+        ) br ON r.request_id = br.request_id
         WHERE s.full_name LIKE '%$search%' 
            OR s.index_number LIKE '%$search%' 
            OR s.phone LIKE '%$search%'
@@ -26,142 +95,311 @@ $result = $conn->query($sql);
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Admin - View Requests</title>
-    <link rel="stylesheet" href="style.css">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>View Requests</title>
     <style>
-        body { font-family: 'Segoe UI', sans-serif; background-color: #f0f2f5; padding: 40px; }
-        .container { max-width: 1250px; margin: auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
-        h2 { color: #333; margin-bottom: 20px; border-bottom: 2px solid #007bff; padding-bottom: 10px; }
-        
-        .search-section { margin-bottom: 20px; display: flex; gap: 10px; align-items: center; }
-        .search-input { flex-grow: 1; height: 45px; padding: 0 15px; border: 2px solid #ddd; border-radius: 8px; font-size: 14px; box-sizing: border-box; }
-        
-        .btn-base { height: 45px; display: inline-flex; align-items: center; justify-content: center; padding: 0 25px; border-radius: 8px; font-weight: bold; font-size: 14px; text-decoration: none; border: none; cursor: pointer; white-space: nowrap; box-sizing: border-box; transition: 0.2s; }
-        .btn-base:hover { opacity: 0.85; }
-        
-        .search-btn { background: #007bff; color: white; }
-        .clear-btn { background: #6c757d; color: white; }
-        .export-btn { background: #28a745; color: white; }
-
-        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-        th, td { padding: 15px; border-bottom: 1px solid #eee; text-align: left; }
-        th { background-color: #007bff; color: white; text-transform: uppercase; font-size: 12px; }
-        
-        .book-tag { display: inline-block; padding: 4px 10px; margin: 2px; border-radius: 20px; text-decoration: none; font-size: 11px; font-weight: 600; }
-        .tag-pending { background: #fff; color: #d9534f; border: 1px solid #d9534f; }
-        .tag-collected { background: #28a745; color: #fff; border: 1px solid #28a745; }
-        
-        .status-toggle { text-decoration: none; padding: 5px 10px; border-radius: 5px; font-size: 11px; font-weight: bold; }
-        .status-paid { background: #e8f5e9; color: #2e7d32; border: 1px solid #2e7d32; }
-        .status-unpaid { background: #ffebee; color: #c62828; border: 1px solid #c62828; }
-        
-        /* Fixed History Link Styling */
-        .history-link { 
-            font-size: 11px; 
-            color: #6f42c1; 
-            text-decoration: none; 
-            font-weight: bold; 
-            border: 1px solid #6f42c1; 
-            padding: 2px 8px; 
-            border-radius: 4px; 
-            display: inline-block; 
-            margin-top: 8px;
-            background: #f9f6ff;
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            background: linear-gradient(135deg, #f5f7fa 0%, #e4e8ec 100%);
+            min-height: 100vh;
+            padding: 30px 20px;
         }
-        .history-link:hover { background: #6f42c1; color: white; }
-
-        .credit-amt { color: #28a745; font-weight: bold; }
-        .zero-amt { color: #888; }
+        
+        .page-container { max-width: 1300px; margin: 0 auto; }
+        
+        .page-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 25px 30px;
+            border-radius: 16px;
+            margin-bottom: 25px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 10px 30px rgba(102, 126, 234, 0.3);
+        }
+        .page-header h1 { font-size: 24px; font-weight: 600; }
+        .page-header .subtitle { opacity: 0.9; margin-top: 3px; font-size: 13px; }
+        .back-btn {
+            background: rgba(255,255,255,0.2);
+            color: white;
+            padding: 10px 20px;
+            border-radius: 8px;
+            text-decoration: none;
+            font-weight: 600;
+            transition: all 0.3s;
+            border: 1px solid rgba(255,255,255,0.3);
+        }
+        .back-btn:hover { background: rgba(255,255,255,0.3); }
+        
+        .card {
+            background: white;
+            border-radius: 16px;
+            padding: 25px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+        }
+        
+        .search-section {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 25px;
+            flex-wrap: wrap;
+        }
+        .search-input {
+            flex: 1;
+            min-width: 250px;
+            padding: 12px 18px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+        .search-input:focus { outline: none; border-color: #667eea; }
+        
+        .btn {
+            padding: 12px 24px;
+            border-radius: 10px;
+            font-weight: 600;
+            font-size: 14px;
+            text-decoration: none;
+            border: none;
+            cursor: pointer;
+            transition: all 0.3s;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .btn-primary { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; }
+        .btn-secondary { background: #6c757d; color: white; }
+        .btn-success { background: #28a745; color: white; }
+        .btn:hover { opacity: 0.9; transform: translateY(-1px); }
+        
+        .table-container { overflow-x: auto; }
+        table { width: 100%; border-collapse: collapse; min-width: 900px; }
+        th {
+            background: #f8f9fa;
+            padding: 14px 12px;
+            text-align: left;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: #666;
+            font-weight: 700;
+            border-bottom: 2px solid #e9ecef;
+        }
+        td {
+            padding: 16px 12px;
+            border-bottom: 1px solid #f0f0f0;
+            vertical-align: middle;
+            font-size: 14px;
+        }
+        tr:hover { background: #fafbfc; }
+        
+        .student-info .name { font-weight: 600; color: #333; }
+        .student-info .index { color: #888; font-size: 12px; margin-top: 2px; }
+        
+        .book-tag {
+            display: inline-block;
+            padding: 5px 12px;
+            margin: 3px;
+            border-radius: 20px;
+            text-decoration: none;
+            font-size: 11px;
+            font-weight: 600;
+            transition: all 0.2s;
+        }
+        .tag-pending { background: #fff3cd; color: #856404; border: 1px solid #ffc107; }
+        .tag-pending:hover { background: #ffc107; color: #333; }
+        .tag-collected { background: #d4edda; color: #155724; border: 1px solid #28a745; }
+        .tag-collected:hover { background: #28a745; color: white; }
+        
+        .status-badge {
+            display: inline-block;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            text-decoration: none;
+        }
+        .status-paid { background: #d4edda; color: #155724; }
+        .status-unpaid { background: #f8d7da; color: #721c24; }
+        
+        .history-btn {
+            font-size: 11px;
+            color: #667eea;
+            text-decoration: none;
+            font-weight: 600;
+            padding: 4px 10px;
+            border-radius: 6px;
+            background: #f0f0ff;
+            display: inline-block;
+            margin-top: 6px;
+            transition: all 0.2s;
+        }
+        .history-btn:hover { background: #667eea; color: white; }
+        
+        .credit-amt { color: #28a745; font-weight: 700; }
+        .debit-amt { color: #dc3545; font-weight: 700; }
+        .zero-amt { color: #ccc; }
+        
+        .action-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 34px;
+            height: 34px;
+            border-radius: 8px;
+            text-decoration: none;
+            font-size: 16px;
+            transition: all 0.2s;
+            margin-right: 5px;
+        }
+        .action-edit { background: #e3f2fd; }
+        .action-edit:hover { background: #2196f3; }
+        .action-delete { background: #ffebee; }
+        .action-delete:hover { background: #f44336; }
+        .action-return { background: #fff3cd; }
+        .action-return:hover { background: #ffc107; }
+        
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #888;
+        }
+        .empty-state .icon { font-size: 48px; margin-bottom: 15px; }
     </style>
 </head>
 <body>
-    <div class="container">
-        <a href="admin.php" style="text-decoration:none; color:#007bff; font-weight:bold;">← Back to Dashboard</a>
-        <h2>Course Material Requests</h2>
 
+<div class="page-container">
+    <div class="page-header">
+        <div>
+            <h1>📩 Student Requests</h1>
+            <p class="subtitle">Manage orders, payments & book collection</p>
+        </div>
+        <a href="admin.php" class="back-btn">← Back to Dashboard</a>
+    </div>
+    
+    <div class="card">
         <form method="GET" class="search-section">
             <input type="text" name="search" class="search-input" 
-                   placeholder="Search Student..." 
+                   placeholder="Search by name, index number, phone or book..." 
                    value="<?php echo htmlspecialchars($search); ?>">
-            <button type="submit" class="btn-base search-btn">Search</button>
-            
+            <button type="submit" class="btn btn-primary">🔍 Search</button>
             <?php if (!empty($search)): ?>
-                <a href="view_request.php" class="btn-base clear-btn">Clear</a>
-                <a href="export_excel.php?search=<?php echo urlencode($search); ?>" class="btn-base export-btn">📥 Export CSV</a>
+                <a href="view_request.php" class="btn btn-secondary">Clear</a>
+                <a href="export_excel.php?search=<?php echo urlencode($search); ?>" class="btn btn-success">📥 Export</a>
             <?php endif; ?>
         </form>
-
-       <table>
-            <thead>
-                <tr>
-                    <th>Date</th>
-                    <th>Student Info</th>
-                    <th>Books (Issue)</th>
-                    <th>Cost (GH₵)</th>
-                    <th>Paid (GH₵)</th>
-                    <th>Payment Status</th>
-                    <th>Credit Balance</th>
-                    <th>Actions</th>
-                </tr>
-            </thead>
-            <tbody>
-            <?php if ($result && $result->num_rows > 0): ?>
-                <?php while($row = $result->fetch_assoc()): ?>
-                <?php 
-                    $credit_balance = $row['amount_paid'] - $row['total_amount']; 
-                ?>
-                <tr>
-                    <td><?php echo date('M d', strtotime($row['created_at'])); ?></td>
-                    <td>
-                        <div style="line-height: 1.6;">
-                            <strong><?php echo htmlspecialchars($row['full_name']); ?></strong><br>
-                            <small><?php echo htmlspecialchars($row['index_number']); ?></small><br>
-                            <a href="student_history.php?index=<?php echo urlencode($row['index_number']); ?>" class="history-link">📜 History</a>
-                        </div>
-                    </td>
-                    <td>
-                        <?php 
-                        if ($row['books_data']) {
-                            $books = explode('|', $row['books_data']);
-                            foreach ($books as $book) {
-                                $parts = explode(':', $book);
-                                if(count($parts) == 3) {
-                                    list($item_id, $title, $is_collected) = $parts;
-                                    $tagClass = ($is_collected == 1) ? 'tag-collected' : 'tag-pending';
-                                    echo "<a href='toggle_book_collection.php?item_id=$item_id' class='book-tag $tagClass'>".($is_collected == 1 ? '✓ ' : '+ ')."$title</a>";
+        
+        <div class="table-container">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Date</th>
+                        <th>Student</th>
+                        <th>Books (Click to toggle)</th>
+                        <th>Cost</th>
+                        <th>Paid</th>
+                        <th>Status</th>
+                        <th>Credit</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                <?php if ($result && $result->num_rows > 0): ?>
+                    <?php while($row = $result->fetch_assoc()): ?>
+                    <?php
+                        $credit_balance = max(0, floatval($row['credit_balance']));
+                        $overpaid_amount = max(0, floatval($row['amount_paid']) - floatval($row['total_amount']));
+                        $debit_amount = max(0, floatval($row['total_amount']) - floatval($row['amount_paid']));
+                        $refunded_amount = max(0, floatval($row['refunded_amount'] ?? 0));
+                    ?>
+                    <tr>
+                        <td><?php echo date('M d', strtotime($row['created_at'])); ?></td>
+                        <td>
+                            <div class="student-info">
+                                <div class="name"><?php echo htmlspecialchars($row['full_name']); ?></div>
+                                <div class="index"><?php echo htmlspecialchars($row['index_number']); ?></div>
+                                <a href="student_history.php?index=<?php echo urlencode($row['index_number']); ?>" class="history-btn">📜 History</a>
+                            </div>
+                        </td>
+                        <td>
+                            <?php 
+                            if ($row['books_data']) {
+                                $books = explode('|', $row['books_data']);
+                                foreach ($books as $book) {
+                                    $parts = explode(':', $book);
+                                    if(count($parts) == 3) {
+                                        list($item_id, $title, $is_collected) = $parts;
+                                        $tagClass = ($is_collected == 1) ? 'tag-collected' : 'tag-pending';
+                                        $icon = ($is_collected == 1) ? '✓' : '○';
+                                        echo "<a href='toggle_book_collection.php?item_id=$item_id' class='book-tag $tagClass'>$icon $title</a>";
+                                    }
                                 }
                             }
-                        }
-                        ?>
-                    </td>
-                    <td><?php echo number_format($row['total_amount'], 2); ?></td>
-                    <td><?php echo number_format($row['amount_paid'], 2); ?></td>
-                    <td>
-                        <a href="toggle_payment.php?request_id=<?php echo $row['request_id']; ?>" 
-                           class="status-toggle <?php echo ($row['payment_status'] == 'paid') ? 'status-paid' : 'status-unpaid'; ?>">
-                            <?php echo strtoupper($row['payment_status']); ?>
-                        </a>
-                    </td>
-                    <td>
-                        <?php if ($credit_balance > 0): ?>
-                            <span class="credit-amt">GH₵ <?php echo number_format($credit_balance, 2); ?></span>
-                        <?php else: ?>
-                            <span class="zero-amt">0.00</span>
-                        <?php endif; ?>
-                    </td>
-                    <td style="white-space: nowrap;">
-                        <a href="edit_request.php?id=<?php echo $row['request_id']; ?>" style="color: #007bff; text-decoration: none; font-size: 18px;" title="Edit Amount">✏️</a>
-                        <a href="delete_request.php?id=<?php echo $row['request_id']; ?>" 
-                           style="color: #d63031; text-decoration: none; font-size: 18px; margin-left: 10px;" 
-                           onclick="return confirm('Are you sure you want to delete this entire request?');" title="Delete Entry">🗑️</a>
-                    </td>
-                </tr>
-                <?php endwhile; ?>
-            <?php else: ?>
-                <tr><td colspan="8" style="text-align:center;">No requests found.</td></tr>
-            <?php endif; ?>
-            </tbody>
-        </table>
+                            ?>
+                        </td>
+                        <td><strong>GH₵ <?php echo number_format($row['total_amount'], 2); ?></strong></td>
+                        <td>GH₵ <?php echo number_format($row['amount_paid'], 2); ?></td>
+                        <td>
+                            <a href="toggle_payment.php?request_id=<?php echo $row['request_id']; ?>" 
+                               class="status-badge <?php echo ($row['payment_status'] == 'paid') ? 'status-paid' : 'status-unpaid'; ?>">
+                                <?php echo strtoupper($row['payment_status']); ?>
+                            </a>
+                        </td>
+                        <td>
+                            <?php if ($refunded_amount > 0): ?>
+                                <div class="credit-amt">Returned: GH₵ <?php echo number_format($refunded_amount, 2); ?></div>
+                                <?php if (!empty($row['last_return_date'])): ?>
+                                    <div class="index" style="margin-top:4px;"><?php echo date('M d, Y', strtotime($row['last_return_date'])); ?></div>
+                                <?php endif; ?>
+                            <?php elseif ($debit_amount > 0): ?>
+                                <div class="debit-amt">Owes: GH₵ <?php echo number_format($debit_amount, 2); ?></div>
+                                <?php if ($credit_balance > 0): ?>
+                                    <div class="index" style="margin-top:4px; color:#28a745; font-weight:700;">Credit: GH₵ <?php echo number_format($credit_balance, 2); ?></div>
+                                <?php endif; ?>
+                            <?php elseif ($credit_balance > 0 || $overpaid_amount > 0): ?>
+                                <?php if ($credit_balance > 0): ?>
+                                    <div class="credit-amt">Credit: GH₵ <?php echo number_format($credit_balance, 2); ?></div>
+                                <?php endif; ?>
+                                <?php if ($overpaid_amount > 0): ?>
+                                    <div class="index" style="margin-top:4px; color:#667eea; font-weight:600;">Overpaid: GH₵ <?php echo number_format($overpaid_amount, 2); ?></div>
+                                <?php endif; ?>
+                            <?php else: ?>
+                                <span class="zero-amt">—</span>
+                            <?php endif; ?>
+                        </td>
+                        <td>
+                            <a href="edit_request.php?id=<?php echo $row['request_id']; ?>" class="action-btn action-edit" title="Edit">✏️</a>
+                            <?php if ($refunded_amount <= 0 && ($credit_balance > 0 || $overpaid_amount > 0)): ?>
+                                <a href="view_request.php?return_balance=1&request_id=<?php echo $row['request_id']; ?>&student_id=<?php echo $row['student_id']; ?>" 
+                                   class="action-btn action-return" 
+                                   onclick="return confirm('Mark this balance as returned to the student?');" 
+                                   title="Mark Returned">💵</a>
+                            <?php endif; ?>
+                            <a href="delete_request.php?id=<?php echo $row['request_id']; ?>" class="action-btn action-delete" 
+                               onclick="return confirm('Delete this request?');" title="Delete">🗑️</a>
+                        </td>
+                    </tr>
+                    <?php endwhile; ?>
+                <?php else: ?>
+                    <tr>
+                        <td colspan="8">
+                            <div class="empty-state">
+                                <div class="icon">📭</div>
+                                <p>No requests found</p>
+                            </div>
+                        </td>
+                    </tr>
+                <?php endif; ?>
+                </tbody>
+            </table>
+        </div>
     </div>
+</div>
+
 </body>
 </html>

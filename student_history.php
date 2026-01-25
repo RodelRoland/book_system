@@ -23,98 +23,190 @@ $grand_total_paid = 0;
 ?>
 
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Detailed History</title>
-    <link rel="stylesheet" href="style.css">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Student History</title>
     <style>
-        body { font-family: 'Segoe UI', sans-serif; background: #f4f7f6; padding: 30px; }
-        .history-card { max-width: 1000px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 5px 15px rgba(0,0,0,0.1); }
-        
-        .book-pill { 
-            display: inline-block; 
-            padding: 2px 10px; 
-            margin: 2px; 
-            border-radius: 4px; 
-            font-size: 12px; 
-            font-weight: 500;
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            background: linear-gradient(135deg, #f5f7fa 0%, #e4e8ec 100%);
+            min-height: 100vh;
+            padding: 30px 20px;
         }
-        .collected { background: #e8f5e9; color: #2e7d32; border: 1px solid #c8e6c9; }
-        .pending { background: #fff5f5; color: #c62828; border: 1px solid #ffcdd2; }
         
-        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-        th, td { padding: 12px; border-bottom: 1px solid #eee; text-align: left; }
-        th { background: #6f42c1; color: white; font-size: 13px; }
-        .total-row { background-color: #f8f9fa; font-weight: bold; }
-        .credit-text { color: #28a745; font-weight: bold; }
+        .page-container { max-width: 1100px; margin: 0 auto; }
+        
+        .page-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 25px 30px;
+            border-radius: 16px;
+            margin-bottom: 25px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 10px 30px rgba(102, 126, 234, 0.3);
+        }
+        .page-header h1 { font-size: 22px; font-weight: 600; }
+        .page-header .subtitle { opacity: 0.9; margin-top: 3px; font-size: 13px; }
+        .back-btn {
+            background: rgba(255,255,255,0.2);
+            color: white;
+            padding: 10px 20px;
+            border-radius: 8px;
+            text-decoration: none;
+            font-weight: 600;
+            transition: all 0.3s;
+            border: 1px solid rgba(255,255,255,0.3);
+        }
+        .back-btn:hover { background: rgba(255,255,255,0.3); }
+        
+        .card {
+            background: white;
+            border-radius: 16px;
+            padding: 25px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+        }
+        
+        .table-container { overflow-x: auto; }
+        table { width: 100%; border-collapse: collapse; min-width: 700px; }
+        th {
+            background: #f8f9fa;
+            padding: 14px 12px;
+            text-align: left;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: #666;
+            font-weight: 700;
+            border-bottom: 2px solid #e9ecef;
+        }
+        td {
+            padding: 14px 12px;
+            border-bottom: 1px solid #f0f0f0;
+            vertical-align: middle;
+            font-size: 14px;
+        }
+        tr:hover { background: #fafbfc; }
+        
+        .book-pill {
+            display: inline-block;
+            padding: 4px 10px;
+            margin: 2px;
+            border-radius: 15px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        .collected { background: #d4edda; color: #155724; }
+        .pending { background: #fff3cd; color: #856404; }
+        
+        .status-badge {
+            display: inline-block;
+            padding: 5px 12px;
+            border-radius: 15px;
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+        .status-paid { background: #d4edda; color: #155724; }
+        .status-unpaid { background: #f8d7da; color: #721c24; }
+        
+        .credit-text { color: #28a745; font-weight: 700; }
+        
+        .total-row {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        .total-row td { font-weight: 700; border: none; }
+        .total-row .credit-text { color: #90EE90; }
+        
+        .empty-state { text-align: center; padding: 50px; color: #888; }
     </style>
 </head>
 <body>
-    <div class="history-card">
-        <a href="view_request.php" style="text-decoration:none; color:#6f42c1; font-weight:bold;">← Back to All Requests</a>
-        <h2 style="margin-top:15px; color: #2c3e50;">Full History for Index: <?php echo htmlspecialchars($index); ?></h2>
 
-        <table>
-            <thead>
-                <tr>
-                    <th>Date</th>
-                    <th>Books & Status</th>
-                    <th>Cost</th>
-                    <th>Paid</th>
-                    <th>Status</th>
-                    <th>Credit</th>
-                </tr>
-            </thead>
-            <tbody>
-                <?php if ($result && $result->num_rows > 0): ?>
-                    <?php while($row = $result->fetch_assoc()): ?>
-                    <?php 
-                        $grand_total_cost += $row['total_amount']; 
-                        $grand_total_paid += $row['amount_paid'];
-                        $balance = $row['amount_paid'] - $row['total_amount'];
-                        $display_balance = ($balance > 0) ? $balance : 0;
-                    ?>
-                    <tr>
-                        <td><?php echo date('M d, Y', strtotime($row['created_at'])); ?></td>
-                        <td>
-                            <?php 
-                            $books = explode('|', $row['books_data']);
-                            foreach ($books as $book) {
-                                list($title, $is_collected) = explode(':', $book);
-                                $class = ($is_collected == 1) ? 'collected' : 'pending';
-                                $icon = ($is_collected == 1) ? '✓' : '⌛';
-                                echo "<span class='book-pill $class'>$icon " . htmlspecialchars($title) . "</span> ";
-                            }
-                            ?>
-                        </td>
-                        <td><?php echo number_format($row['total_amount'], 2); ?></td>
-                        <td><?php echo number_format($row['amount_paid'], 2); ?></td>
-                        <td>
-                            <strong style="color: <?php echo ($row['payment_status'] == 'paid') ? '#28a745' : '#dc3545'; ?>">
-                                <?php echo strtoupper($row['payment_status']); ?>
-                            </strong>
-                        </td>
-                        <td class="credit-text"><?php echo number_format($display_balance, 2); ?></td>
-                    </tr>
-                    <?php endwhile; ?>
-                    
-                    <tr class="total-row">
-                        <td colspan="2" style="text-align: right;">Cumulative Totals:</td>
-                        <td>GH₵ <?php echo number_format($grand_total_cost, 2); ?></td>
-                        <td>GH₵ <?php echo number_format($grand_total_paid, 2); ?></td>
-                        <td></td>
-                        <td class="credit-text">
-                            GH₵ <?php 
-                                $total_credit = $grand_total_paid - $grand_total_cost;
-                                echo number_format(($total_credit > 0 ? $total_credit : 0), 2); 
-                            ?>
-                        </td>
-                    </tr>
-                <?php else: ?>
-                    <tr><td colspan="6" style="text-align:center;">No history found.</td></tr>
-                <?php endif; ?>
-            </tbody>
-        </table>
+<div class="page-container">
+    <div class="page-header">
+        <div>
+            <h1>📜 Student History</h1>
+            <p class="subtitle">Index: <?php echo htmlspecialchars($index); ?></p>
+        </div>
+        <a href="view_request.php" class="back-btn">← Back to Requests</a>
     </div>
+    
+    <div class="card">
+        <div class="table-container">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Date</th>
+                        <th>Books & Collection Status</th>
+                        <th>Cost</th>
+                        <th>Paid</th>
+                        <th>Status</th>
+                        <th>Credit</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php if ($result && $result->num_rows > 0): ?>
+                        <?php while($row = $result->fetch_assoc()): ?>
+                        <?php 
+                            $grand_total_cost += $row['total_amount']; 
+                            $grand_total_paid += $row['amount_paid'];
+                            $balance = $row['amount_paid'] - $row['total_amount'];
+                            $display_balance = ($balance > 0) ? $balance : 0;
+                        ?>
+                        <tr>
+                            <td><?php echo date('M d, Y', strtotime($row['created_at'])); ?></td>
+                            <td>
+                                <?php 
+                                $books = explode('|', $row['books_data']);
+                                foreach ($books as $book) {
+                                    list($title, $is_collected) = explode(':', $book);
+                                    $class = ($is_collected == 1) ? 'collected' : 'pending';
+                                    $icon = ($is_collected == 1) ? '✓' : '○';
+                                    echo "<span class='book-pill $class'>$icon " . htmlspecialchars($title) . "</span> ";
+                                }
+                                ?>
+                            </td>
+                            <td>GH₵ <?php echo number_format($row['total_amount'], 2); ?></td>
+                            <td>GH₵ <?php echo number_format($row['amount_paid'], 2); ?></td>
+                            <td>
+                                <span class="status-badge <?php echo ($row['payment_status'] == 'paid') ? 'status-paid' : 'status-unpaid'; ?>">
+                                    <?php echo strtoupper($row['payment_status']); ?>
+                                </span>
+                            </td>
+                            <td class="credit-text"><?php echo number_format($display_balance, 2); ?></td>
+                        </tr>
+                        <?php endwhile; ?>
+                        
+                        <tr class="total-row">
+                            <td colspan="2" style="text-align: right;">Cumulative Totals:</td>
+                            <td>GH₵ <?php echo number_format($grand_total_cost, 2); ?></td>
+                            <td>GH₵ <?php echo number_format($grand_total_paid, 2); ?></td>
+                            <td></td>
+                            <td class="credit-text">
+                                GH₵ <?php 
+                                    $total_credit = $grand_total_paid - $grand_total_cost;
+                                    echo number_format(($total_credit > 0 ? $total_credit : 0), 2); 
+                                ?>
+                            </td>
+                        </tr>
+                    <?php else: ?>
+                        <tr>
+                            <td colspan="6">
+                                <div class="empty-state">No history found for this student.</div>
+                            </td>
+                        </tr>
+                    <?php endif; ?>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
 </body>
 </html>
