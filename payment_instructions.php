@@ -11,7 +11,8 @@ if (!isset($_GET['request_id'])) {
 $request_id = intval($_GET['request_id']);
 
 $query = $conn->query("
-    SELECT r.total_amount, r.amount_paid, r.payment_status, s.index_number, s.full_name, s.credit_balance
+    SELECT r.total_amount, r.amount_paid, r.payment_status, r.admin_id,
+           s.index_number, s.full_name, s.credit_balance
     FROM requests r
     JOIN students s ON r.student_id = s.student_id
     WHERE r.request_id = $request_id
@@ -22,6 +23,32 @@ if (!$query || $query->num_rows === 0) {
 }
 
 $data = $query->fetch_assoc();
+
+// Fetch rep's payment details
+$rep_admin_id = intval($data['admin_id'] ?? 0);
+$rep_info = null;
+
+if ($rep_admin_id > 0) {
+    $rep_query = $conn->query("SELECT full_name, momo_number, account_name, account_number, bank_name FROM admins WHERE admin_id = $rep_admin_id");
+    if ($rep_query && $rep_query->num_rows > 0) {
+        $rep_info = $rep_query->fetch_assoc();
+    }
+}
+
+// Fallback to super admin if no rep info
+if (!$rep_info || empty($rep_info['momo_number'])) {
+    $fallback = $conn->query("SELECT full_name, momo_number, account_name, account_number, bank_name FROM admins WHERE role = 'super_admin' AND is_active = 1 LIMIT 1");
+    if ($fallback && $fallback->num_rows > 0) {
+        $rep_info = $fallback->fetch_assoc();
+    }
+}
+
+// Final fallback defaults
+$rep_name = $rep_info['full_name'] ?? 'Course Representative';
+$momo_number = $rep_info['momo_number'] ?? '';
+$account_name = $rep_info['account_name'] ?? $rep_name;
+$account_number = $rep_info['account_number'] ?? '';
+$bank_name = $rep_info['bank_name'] ?? '';
 
 $subtotal      = (float) $data['total_amount'];
 $credit_used   = (float) $data['amount_paid'];
@@ -90,15 +117,34 @@ $is_paid       = $data['payment_status'] === 'paid';
         <?php if (!$is_paid): ?>
         <div class="payment-details">
             <h4>Pay To:</h4>
+            <?php if (!empty($momo_number)): ?>
             <div class="detail-row">
-                <span class="label">Account Name</span>
-                <span class="value">Roland Kitsi</span>
+                <span class="label">MoMo Name</span>
+                <span class="value"><?php echo htmlspecialchars($account_name ?: $rep_name); ?></span>
             </div>
             <div class="detail-row">
                 <span class="label">MoMo Number</span>
-                <span class="value">0549090433</span>
+                <span class="value"><?php echo htmlspecialchars($momo_number); ?></span>
             </div>
-            <div class="detail-row">
+            <?php endif; ?>
+            <?php if (!empty($account_number) && !empty($bank_name)): ?>
+            <div style="margin-top: 15px; padding-top: 15px; border-top: 1px dashed #ddd;">
+                <h4 style="margin-bottom: 10px;">Or Bank Transfer:</h4>
+                <div class="detail-row">
+                    <span class="label">Bank</span>
+                    <span class="value"><?php echo htmlspecialchars($bank_name); ?></span>
+                </div>
+                <div class="detail-row">
+                    <span class="label">Account Name</span>
+                    <span class="value"><?php echo htmlspecialchars($account_name ?: $rep_name); ?></span>
+                </div>
+                <div class="detail-row">
+                    <span class="label">Account Number</span>
+                    <span class="value"><?php echo htmlspecialchars($account_number); ?></span>
+                </div>
+            </div>
+            <?php endif; ?>
+            <div class="detail-row" style="margin-top: 15px;">
                 <span class="label">Reference (Index Number)</span>
                 <span class="value highlight"><?php echo htmlspecialchars($data['index_number']); ?></span>
             </div>
@@ -106,7 +152,7 @@ $is_paid       = $data['payment_status'] === 'paid';
 
         <div class="instruction-box">
             <p><strong>Important:</strong></p>
-            <p>Please make the exact payment using Mobile Money and use your Index Number as the reference.</p>
+            <p>Please make the exact payment using Mobile Money or Bank Transfer and use your Index Number as the reference.</p>
             <p>After payment, wait for confirmation from the course representative. You will be notified once your books are ready for collection.</p>
         </div>
         <?php else: ?>
@@ -128,6 +174,8 @@ document.querySelector('.cls-btn').addEventListener('click', function() {
     window.location.href = 'index.php';
 });
 </script>
+
+<?php include 'footer.php'; ?>
 
 </body>
 </html>

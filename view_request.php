@@ -6,6 +6,14 @@ if (!isset($_SESSION['admin_logged_in'])) {
 }
 include 'db.php'; 
 
+$semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
+
+// Get current admin info for filtering
+$current_admin_id = intval($_SESSION['admin_id'] ?? 0);
+$current_admin_role = $_SESSION['admin_role'] ?? 'rep';
+$is_super_admin = ($current_admin_role === 'super_admin');
+$admin_filter = $is_super_admin ? '' : "AND r.admin_id = $current_admin_id";
+
 // Create table to track returned balances (safe if already exists)
 $conn->query("CREATE TABLE IF NOT EXISTS balance_returns (
     return_id INT AUTO_INCREMENT PRIMARY KEY,
@@ -64,6 +72,17 @@ if (isset($_GET['return_balance'], $_GET['request_id'], $_GET['student_id'])) {
 // 1. Capture search input
 $search = isset($_GET['search']) ? $conn->real_escape_string($_GET['search']) : '';
 
+$collection_filter = isset($_GET['collection_filter']) ? $_GET['collection_filter'] : 'all';
+if (!in_array($collection_filter, ['all', 'not_taken'], true)) {
+    $collection_filter = 'all';
+}
+
+$having_sql = '';
+if ($collection_filter === 'not_taken') {
+    $having_sql = "HAVING pending_items > 0";
+}
+
+
 // 2. SQL Query
 $sql = "SELECT 
             r.request_id, r.student_id,
@@ -71,22 +90,29 @@ $sql = "SELECT
             r.total_amount, r.amount_paid, r.payment_status, r.created_at,
             COALESCE(br.refunded_amount, 0) AS refunded_amount,
             br.last_return_date,
+            SUM(CASE WHEN ri.is_collected = 0 OR ri.is_collected IS NULL THEN 1 ELSE 0 END) AS pending_items,
             GROUP_CONCAT(CONCAT(ri.item_id, ':', b.book_title, ':', ri.is_collected) SEPARATOR '|') AS books_data
         FROM requests r
         JOIN students s ON r.student_id = s.student_id
         LEFT JOIN request_items ri ON r.request_id = ri.request_id
         LEFT JOIN books b ON ri.book_id = b.book_id
+
         LEFT JOIN (
             SELECT request_id, SUM(amount) AS refunded_amount, MAX(return_date) AS last_return_date
             FROM balance_returns
             WHERE request_id IS NOT NULL
             GROUP BY request_id
         ) br ON r.request_id = br.request_id
-        WHERE s.full_name LIKE '%$search%' 
+        WHERE r.semester_id = $semester_id
+          $admin_filter
+          AND (
+               s.full_name LIKE '%$search%' 
            OR s.index_number LIKE '%$search%' 
            OR s.phone LIKE '%$search%'
            OR b.book_title LIKE '%$search%'
+          )
         GROUP BY r.request_id
+        $having_sql
         ORDER BY r.created_at DESC";
 
 $result = $conn->query($sql);
@@ -174,6 +200,15 @@ $result = $conn->query($sql);
         .btn-secondary { background: #6c757d; color: white; }
         .btn-success { background: #28a745; color: white; }
         .btn:hover { opacity: 0.9; transform: translateY(-1px); }
+        
+        .alert {
+            padding: 12px 15px;
+            border-radius: 10px;
+            margin-bottom: 15px;
+            font-size: 14px;
+        }
+        .alert-warning { background: #fff3cd; color: #856404; border-left: 4px solid #ffc107; }
+        .alert-error { background: #f8d7da; color: #721c24; border-left: 4px solid #dc3545; }
         
         .table-container { overflow-x: auto; }
         table { width: 100%; border-collapse: collapse; min-width: 900px; }
@@ -283,14 +318,26 @@ $result = $conn->query($sql);
     </div>
     
     <div class="card">
+        <?php if (isset($_GET['msg']) && $_GET['msg'] === 'out_of_stock'): ?>
+            <div class="alert alert-warning">This book is out of stock. Set the stock quantity in Manage Books before marking it as collected.</div>
+        <?php endif; ?>
+        <?php if (isset($_GET['msg']) && $_GET['msg'] === 'toggle_failed'): ?>
+            <div class="alert alert-error">Could not update collection status. Please try again. If it continues, check that the book has stock and exists in the database.</div>
+        <?php endif; ?>
         <form method="GET" class="search-section">
             <input type="text" name="search" class="search-input" 
                    placeholder="Search by name, index number, phone or book..." 
                    value="<?php echo htmlspecialchars($search); ?>">
+            <select name="collection_filter" class="search-input" style="max-width: 260px; min-width: 220px;">
+                <option value="all" <?php echo ($collection_filter === 'all') ? 'selected' : ''; ?>>All Requests</option>
+                <option value="not_taken" <?php echo ($collection_filter === 'not_taken') ? 'selected' : ''; ?>>Not Taken (Not Collected Yet)</option>
+            </select>
             <button type="submit" class="btn btn-primary">🔍 Search</button>
             <?php if (!empty($search)): ?>
+                <a href="view_request.php?collection_filter=<?php echo urlencode($collection_filter); ?>" class="btn btn-secondary">Clear</a>
+                <a href="export_excel.php?search=<?php echo urlencode($search); ?>&collection_filter=<?php echo urlencode($collection_filter); ?>" class="btn btn-success">📥 Export</a>
+            <?php elseif ($collection_filter !== 'all'): ?>
                 <a href="view_request.php" class="btn btn-secondary">Clear</a>
-                <a href="export_excel.php?search=<?php echo urlencode($search); ?>" class="btn btn-success">📥 Export</a>
             <?php endif; ?>
         </form>
         
@@ -400,6 +447,43 @@ $result = $conn->query($sql);
         </div>
     </div>
 </div>
+
+<?php include 'footer.php'; ?>
+
+<script>
+// AJAX toggle for book collection status - prevents page scroll
+document.addEventListener('DOMContentLoaded', function() {
+    document.querySelectorAll('.book-tag').forEach(function(tag) {
+        tag.addEventListener('click', function(e) {
+            e.preventDefault();
+            var link = this;
+            var url = link.getAttribute('href') + '&ajax=1';
+            
+            fetch(url)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        // Update tag appearance
+                        if (data.is_collected === 1) {
+                            link.classList.remove('tag-pending');
+                            link.classList.add('tag-collected');
+                            link.innerHTML = '✓ ' + link.textContent.substring(2);
+                        } else {
+                            link.classList.remove('tag-collected');
+                            link.classList.add('tag-pending');
+                            link.innerHTML = '○ ' + link.textContent.substring(2);
+                        }
+                    } else {
+                        alert('Failed to toggle: ' + (data.error || 'Unknown error'));
+                    }
+                })
+                .catch(err => {
+                    alert('Error toggling book status');
+                });
+        });
+    });
+});
+</script>
 
 </body>
 </html>

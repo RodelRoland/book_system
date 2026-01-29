@@ -1,35 +1,62 @@
 <?php
 session_start();
+error_reporting(0); // Suppress errors on login page to prevent HTML breakage
 require_once 'db.php';
 
 // Redirect if already logged in
 if (isset($_SESSION['admin_logged_in'])) {
-    header('Location: admin.php');
+    if (($_SESSION['admin_role'] ?? '') === 'super_admin') {
+        header('Location: admin.php');
+    } else {
+        header('Location: rep_dashboard.php');
+    }
     exit;
 }
 
+$error = '';
 if ($_SERVER['REQUEST_METHOD'] == 'POST') {
-    $username = $_POST['username'] ?? '';
+    $username = trim($_POST['username'] ?? '');
     $password = $_POST['password'] ?? '';
     
-    // Authenticate against admins table
-    $stmt = $conn->prepare("SELECT admin_id, username, password FROM admins WHERE username = ?");
-    $stmt->bind_param("s", $username);
-    $stmt->execute();
-    $result = $stmt->get_result();
-    
-    if ($result->num_rows === 1) {
-        $admin = $result->fetch_assoc();
-        // Check password (supports both hashed and plain text for backwards compatibility)
-        if (password_verify($password, $admin['password']) || $password === $admin['password']) {
-            $_SESSION['admin_logged_in'] = true;
-            $_SESSION['admin_id'] = $admin['admin_id'];
-            $_SESSION['admin_username'] = $admin['username'];
-            header('Location: admin.php');
-            exit;
+    try {
+        // Authenticate against admins table
+        $stmt = $conn->prepare("SELECT admin_id, username, password_hash, full_name, class_name, role, is_active FROM admins WHERE username = ?");
+        if ($stmt) {
+            $stmt->bind_param("s", $username);
+            $stmt->execute();
+            $result = $stmt->get_result();
+            
+            if ($result && $result->num_rows === 1) {
+                $admin = $result->fetch_assoc();
+                
+                // Check if account is active
+                if (!$admin['is_active']) {
+                    $error = "Your account has been deactivated. Contact the administrator.";
+                } elseif (password_verify($password, $admin['password_hash'])) {
+                    $_SESSION['admin_logged_in'] = true;
+                    $_SESSION['admin_id'] = $admin['admin_id'];
+                    $_SESSION['admin_username'] = $admin['username'];
+                    $_SESSION['admin_full_name'] = $admin['full_name'];
+                    $_SESSION['admin_class_name'] = $admin['class_name'];
+                    $_SESSION['admin_role'] = $admin['role'];
+                    if ($admin['role'] === 'super_admin') {
+                        header('Location: admin.php');
+                    } else {
+                        header('Location: rep_dashboard.php');
+                    }
+                    exit;
+                } else {
+                    $error = "Invalid username or password.";
+                }
+            } else {
+                $error = "Invalid username or password.";
+            }
+        } else {
+            $error = "Database error. Please try again.";
         }
+    } catch (Exception $e) {
+        $error = "System error. Please try again.";
     }
-    $error = "Invalid username or password.";
 }
 ?>
 
@@ -158,19 +185,19 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
             <p>Book Distribution System</p>
         </div>
         
-        <?php if (isset($error)): ?>
-            <div class="error-msg"><?php echo $error; ?></div>
+        <?php if (!empty($error)): ?>
+            <div class="error-msg"><?php echo htmlspecialchars($error); ?></div>
         <?php endif; ?>
 
-        <form method="POST">
+        <form method="POST" autocomplete="off">
             <div class="form-group">
                 <label>Username</label>
-                <input type="text" name="username" placeholder="Enter your username" required>
+                <input type="text" name="username" placeholder="Enter your username" required autofocus autocomplete="username">
             </div>
             
             <div class="form-group">
                 <label>Password</label>
-                <input type="password" name="password" placeholder="Enter your password" required>
+                <input type="password" name="password" placeholder="Enter your password" required autocomplete="current-password">
             </div>
             
             <button type="submit" class="login-btn">Sign In</button>
@@ -179,6 +206,20 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
         <div class="footer-text">Secure Admin Access</div>
     </div>
 </div>
+
+<?php include 'footer.php'; ?>
+
+<script>
+// Ensure inputs are always enabled after page load
+document.addEventListener('DOMContentLoaded', function() {
+    var inputs = document.querySelectorAll('input');
+    inputs.forEach(function(input) {
+        input.disabled = false;
+        input.readOnly = false;
+    });
+    document.querySelector('input[name="username"]').focus();
+});
+</script>
 
 </body>
 </html>

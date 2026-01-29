@@ -2,6 +2,27 @@
 global $conn;
 include 'db.php';
 
+// Get rep ID from URL parameter (allows each rep to share their unique link)
+$rep_id = 0;
+$rep_info = null;
+if (isset($_GET['rep'])) {
+    $rep_username = $conn->real_escape_string($_GET['rep']);
+    $rep_query = $conn->query("SELECT admin_id, full_name, class_name FROM admins WHERE username = '$rep_username' AND is_active = 1");
+    if ($rep_query && $rep_query->num_rows > 0) {
+        $rep_info = $rep_query->fetch_assoc();
+        $rep_id = intval($rep_info['admin_id']);
+    }
+}
+
+// Fallback to super admin
+if ($rep_id <= 0) {
+    $default_rep = $conn->query("SELECT admin_id, full_name, class_name FROM admins WHERE role = 'super_admin' AND is_active = 1 LIMIT 1");
+    if ($default_rep && $default_rep->num_rows > 0) {
+        $rep_info = $default_rep->fetch_assoc();
+        $rep_id = intval($rep_info['admin_id']);
+    }
+}
+
 /* Fetch ONLY available books */
 $books = $conn->query("
     SELECT book_id, book_title, price
@@ -127,6 +148,7 @@ $books = $conn->query("
             <!-- Hidden fields -->
             <input type="hidden" name="total_amount" id="total_amount" value="0.00">
             <input type="hidden" name="payable_amount" id="payable_amount" value="0.00">
+            <input type="hidden" name="rep_id" value="<?php echo $rep_id; ?>">
 
             <button type="submit" class="primary-btn">
                 Proceed to Payment
@@ -248,12 +270,12 @@ document.getElementById('index_number').addEventListener('blur', function() {
     }
 });
 </script>
-
+    
 <script>
 document.querySelector('input[name="index_number"]').addEventListener('blur', function() {
     const indexNumber = this.value;
     if (indexNumber.length < 3) return; // Don't check empty or too short values
-
+     
     fetch('check_student_books.php?index=' + indexNumber)
         .then(response => response.json())
         .then(ownedBooks => {
@@ -261,9 +283,10 @@ document.querySelector('input[name="index_number"]').addEventListener('blur', fu
             document.querySelectorAll('input[name="books[]"]').forEach(checkbox => {
                 checkbox.disabled = false;
                 checkbox.parentElement.style.opacity = "1";
+                checkbox.parentElement.style.textDecoration = "";
                 checkbox.parentElement.title = "";
             });
-
+            
             // Disable books the student already owns
             ownedBooks.forEach(bookId => {
                 const checkbox = document.querySelector(`input[name="books[]"][value="${bookId}"]`);
@@ -278,5 +301,8 @@ document.querySelector('input[name="index_number"]').addEventListener('blur', fu
         });
 });
 </script>
-
+    
+<?php include 'footer.php'; ?>
+    
+</body>
 </html>

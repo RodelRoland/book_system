@@ -6,6 +6,15 @@ $full_name = $_POST['full_name'] ?? '';
 $phone = $_POST['phone'] ?? '';
 $books = $_POST['books'] ?? [];
 $total_amount = floatval($_POST['total_amount'] ?? 0);
+$rep_id = intval($_POST['rep_id'] ?? 0);
+
+// If no rep specified, get default super admin
+if ($rep_id <= 0) {
+    $default_rep = $conn->query("SELECT admin_id FROM admins WHERE role = 'super_admin' AND is_active = 1 LIMIT 1");
+    if ($default_rep && $default_rep->num_rows > 0) {
+        $rep_id = intval($default_rep->fetch_assoc()['admin_id']);
+    }
+}
 
 // Validate index number length
 if (strlen($index_number) !== 10) {
@@ -59,8 +68,9 @@ if ($credit_balance > 0) {
 }
 
 // Create request with credit applied as amount_paid
-$stmt = $conn->prepare("INSERT INTO requests (student_id, total_amount, amount_paid, payment_status) VALUES (?, ?, ?, ?)");
-$stmt->bind_param("idds", $student_id, $total_amount, $credit_used, $payment_status);
+$semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
+$stmt = $conn->prepare("INSERT INTO requests (student_id, total_amount, amount_paid, payment_status, semester_id, admin_id) VALUES (?, ?, ?, ?, ?, ?)");
+$stmt->bind_param("iddsii", $student_id, $total_amount, $credit_used, $payment_status, $semester_id, $rep_id);
 $stmt->execute();
 
 $request_id = $conn->insert_id;

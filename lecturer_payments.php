@@ -7,10 +7,105 @@ if (!isset($_SESSION['admin_logged_in'])) {
     exit;
 }
 
+// Create books_received table if not exists (safe migration)
+$conn->query("
+    CREATE TABLE IF NOT EXISTS books_received (
+        receive_id      INT AUTO_INCREMENT PRIMARY KEY,
+        book_id         INT NOT NULL,
+        copies_received INT NOT NULL,
+        receive_date    DATE NOT NULL,
+        lecturer_name   VARCHAR(100) NULL,
+        notes           VARCHAR(255) NULL,
+        created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (book_id) REFERENCES books(book_id) ON DELETE CASCADE
+    )
+");
+
 $success_msg = '';
 $error_msg = '';
 
-// Handle new payment submission
+$semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
+
+// Get current admin info for filtering
+$current_admin_id = intval($_SESSION['admin_id'] ?? 0);
+$current_admin_role = $_SESSION['admin_role'] ?? 'rep';
+$is_super_admin = ($current_admin_role === 'super_admin');
+$admin_filter = $is_super_admin ? '' : "AND admin_id = $current_admin_id";
+
+$selected_book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
+$selected_book_title = '';
+
+$selected_received_students = 0;
+$selected_yet_students = 0;
+$selected_total_students = 0;
+
+// Handle recording books received from lecturer
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['record_received'])) {
+    $book_id = intval($_POST['book_id']);
+    $copies_received = intval($_POST['copies_received']);
+    $receive_date = $conn->real_escape_string($_POST['receive_date']);
+    $lecturer_name = $conn->real_escape_string($_POST['lecturer_name'] ?? '');
+    $notes = $conn->real_escape_string($_POST['notes'] ?? '');
+    
+    if ($book_id > 0 && $copies_received != 0) {
+        $stmt = $conn->prepare("INSERT INTO books_received (book_id, copies_received, receive_date, lecturer_name, notes, semester_id, admin_id) VALUES (?, ?, ?, ?, ?, ?, ?)");
+        $stmt->bind_param("iisssii", $book_id, $copies_received, $receive_date, $lecturer_name, $notes, $semester_id, $current_admin_id);
+        
+        if ($stmt->execute()) {
+            $success_msg = "Books received recorded successfully!";
+        } else {
+            $error_msg = "Error recording: " . $conn->error;
+        }
+    } else {
+        $error_msg = "Please fill in all required fields.";
+    }
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_received'])) {
+    $receive_id = intval($_POST['receive_id']);
+    $book_id = intval($_POST['book_id']);
+    $copies_received = intval($_POST['copies_received']);
+    $receive_date = $conn->real_escape_string($_POST['receive_date']);
+    $lecturer_name = $conn->real_escape_string($_POST['lecturer_name'] ?? '');
+    $notes = $conn->real_escape_string($_POST['notes'] ?? '');
+
+    if ($receive_id > 0 && $book_id > 0 && $copies_received != 0) {
+        $stmt = $conn->prepare("UPDATE books_received SET copies_received = ?, receive_date = ?, lecturer_name = ?, notes = ? WHERE receive_id = ? AND book_id = ?");
+        $stmt->bind_param("isssii", $copies_received, $receive_date, $lecturer_name, $notes, $receive_id, $book_id);
+        if ($stmt->execute()) {
+            $success_msg = "Received record updated successfully!";
+        } else {
+            $error_msg = "Error updating record: " . $conn->error;
+        }
+    } else {
+        $error_msg = "Please fill in all required fields.";
+    }
+
+    header('Location: lecturer_payments.php?book_id=' . $book_id);
+    exit;
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_received'])) {
+    $receive_id = intval($_POST['receive_id']);
+    $book_id = intval($_POST['book_id']);
+
+    if ($receive_id > 0 && $book_id > 0) {
+        $stmt = $conn->prepare("DELETE FROM books_received WHERE receive_id = ? AND book_id = ?");
+        $stmt->bind_param("ii", $receive_id, $book_id);
+        if ($stmt->execute()) {
+            $success_msg = "Received record deleted successfully!";
+        } else {
+            $error_msg = "Error deleting record: " . $conn->error;
+        }
+    } else {
+        $error_msg = "Invalid delete request.";
+    }
+
+    header('Location: lecturer_payments.php?book_id=' . $book_id);
+    exit;
+}
+
+// Handle recording payment to lecturer
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['record_payment'])) {
     $book_id = intval($_POST['book_id']);
     $copies_paid = intval($_POST['copies_paid']);
@@ -18,9 +113,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['record_payment'])) {
     $payment_date = $conn->real_escape_string($_POST['payment_date']);
     $notes = $conn->real_escape_string($_POST['notes'] ?? '');
     
-    if ($book_id > 0 && $copies_paid > 0 && $amount_paid > 0) {
-        $stmt = $conn->prepare("INSERT INTO lecturer_payments (book_id, copies_paid, amount_paid, payment_date, notes) VALUES (?, ?, ?, ?, ?)");
-        $stmt->bind_param("iidss", $book_id, $copies_paid, $amount_paid, $payment_date, $notes);
+    $same_sign = ($copies_paid > 0 && $amount_paid > 0) || ($copies_paid < 0 && $amount_paid < 0);
+    if ($book_id > 0 && $copies_paid != 0 && $amount_paid != 0 && $same_sign) {
+        $stmt = $conn->prepare("INSERT INTO lecturer_payments (book_id, copies_paid, amount_paid, payment_date, notes, semester_id, admin_id) VALUES (?, ?, ?, ?, ?, ?, ?)");
+        $stmt->bind_param("iidssii", $book_id, $copies_paid, $amount_paid, $payment_date, $notes, $semester_id, $current_admin_id);
         
         if ($stmt->execute()) {
             $success_msg = "Payment recorded successfully!";
@@ -32,23 +128,75 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['record_payment'])) {
     }
 }
 
-// Fetch all books with sales statistics
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_payment'])) {
+    $payment_id = intval($_POST['payment_id']);
+    $book_id = intval($_POST['book_id']);
+    $copies_paid = intval($_POST['copies_paid']);
+    $amount_paid = floatval($_POST['amount_paid']);
+    $payment_date = $conn->real_escape_string($_POST['payment_date']);
+    $notes = $conn->real_escape_string($_POST['notes'] ?? '');
+
+    $same_sign = ($copies_paid > 0 && $amount_paid > 0) || ($copies_paid < 0 && $amount_paid < 0);
+    if ($payment_id > 0 && $book_id > 0 && $copies_paid != 0 && $amount_paid != 0 && $same_sign) {
+        $stmt = $conn->prepare("UPDATE lecturer_payments SET copies_paid = ?, amount_paid = ?, payment_date = ?, notes = ? WHERE payment_id = ? AND book_id = ?");
+        $stmt->bind_param("idssii", $copies_paid, $amount_paid, $payment_date, $notes, $payment_id, $book_id);
+        if ($stmt->execute()) {
+            $success_msg = "Payment record updated successfully!";
+        } else {
+            $error_msg = "Error updating payment: " . $conn->error;
+        }
+    } else {
+        $error_msg = "Please fill in all required fields.";
+    }
+
+    header('Location: lecturer_payments.php?book_id=' . $book_id);
+    exit;
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_payment'])) {
+    $payment_id = intval($_POST['payment_id']);
+    $book_id = intval($_POST['book_id']);
+
+    if ($payment_id > 0 && $book_id > 0) {
+        $stmt = $conn->prepare("DELETE FROM lecturer_payments WHERE payment_id = ? AND book_id = ?");
+        $stmt->bind_param("ii", $payment_id, $book_id);
+        if ($stmt->execute()) {
+            $success_msg = "Payment record deleted successfully!";
+        } else {
+            $error_msg = "Error deleting payment: " . $conn->error;
+        }
+    } else {
+        $error_msg = "Invalid delete request.";
+    }
+
+    header('Location: lecturer_payments.php?book_id=' . $book_id);
+    exit;
+}
+
+// Fetch all books with received, sold, and payment statistics
 $books_sql = "
     SELECT 
         b.book_id,
         b.book_title,
         b.price,
-        COUNT(DISTINCT CASE WHEN ri.is_collected = 1 THEN ri.item_id END) as sold_copies,
-        COUNT(DISTINCT CASE WHEN ri.is_collected = 1 AND r.payment_status = 'paid' THEN ri.item_id END) as sold_paid_copies,
-        COALESCE(SUM(CASE WHEN ri.is_collected = 1 AND r.payment_status = 'paid' THEN b.price ELSE 0 END), 0) as sold_paid_amount,
+        COALESCE(br.total_received, 0) as received_copies,
+        COUNT(DISTINCT CASE WHEN ri.is_collected = 1 AND r.request_id IS NOT NULL THEN ri.item_id END) as sold_copies,
+        COUNT(DISTINCT CASE WHEN ri.is_collected = 1 AND r.request_id IS NOT NULL AND r.payment_status = 'paid' THEN ri.item_id END) as sold_paid_copies,
         COALESCE(lp.total_paid_copies, 0) as lecturer_paid_copies,
         COALESCE(lp.total_paid_amount, 0) as lecturer_paid_amount
     FROM books b
     LEFT JOIN request_items ri ON b.book_id = ri.book_id
-    LEFT JOIN requests r ON ri.request_id = r.request_id
+    LEFT JOIN requests r ON ri.request_id = r.request_id AND r.semester_id = {$semester_id}
+    LEFT JOIN (
+        SELECT book_id, SUM(copies_received) as total_received
+        FROM books_received
+        WHERE semester_id = {$semester_id} " . ($is_super_admin ? "" : "AND admin_id = {$current_admin_id}") . "
+        GROUP BY book_id
+    ) br ON b.book_id = br.book_id
     LEFT JOIN (
         SELECT book_id, SUM(copies_paid) as total_paid_copies, SUM(amount_paid) as total_paid_amount
         FROM lecturer_payments
+        WHERE semester_id = {$semester_id} " . ($is_super_admin ? "" : "AND admin_id = {$current_admin_id}") . "
         GROUP BY book_id
     ) lp ON b.book_id = lp.book_id
     GROUP BY b.book_id
@@ -56,18 +204,87 @@ $books_sql = "
 ";
 $books_result = $conn->query($books_sql);
 
+if ($selected_book_id > 0) {
+    $stmt = $conn->prepare("SELECT book_title FROM books WHERE book_id = ? LIMIT 1");
+    $stmt->bind_param("i", $selected_book_id);
+    $stmt->execute();
+    $res = $stmt->get_result();
+    if ($res && $res->num_rows === 1) {
+        $selected_book_title = $res->fetch_assoc()['book_title'];
+    } else {
+        $selected_book_id = 0;
+    }
+}
+
+if ($selected_book_id > 0) {
+    $stmt = $conn->prepare("SELECT COUNT(DISTINCT r.student_id) AS c FROM request_items ri JOIN requests r ON ri.request_id = r.request_id WHERE ri.book_id = ? AND r.semester_id = ?");
+    $stmt->bind_param("ii", $selected_book_id, $semester_id);
+    $stmt->execute();
+    $res = $stmt->get_result();
+    if ($res && $res->num_rows === 1) {
+        $selected_total_students = intval($res->fetch_assoc()['c']);
+    }
+
+    $stmt = $conn->prepare("SELECT COUNT(DISTINCT r.student_id) AS c FROM request_items ri JOIN requests r ON ri.request_id = r.request_id WHERE ri.book_id = ? AND ri.is_collected = 1 AND r.semester_id = ?");
+    $stmt->bind_param("ii", $selected_book_id, $semester_id);
+    $stmt->execute();
+    $res = $stmt->get_result();
+    if ($res && $res->num_rows === 1) {
+        $selected_received_students = intval($res->fetch_assoc()['c']);
+    }
+
+    $stmt = $conn->prepare("SELECT COUNT(DISTINCT r.student_id) AS c FROM request_items ri JOIN requests r ON ri.request_id = r.request_id WHERE ri.book_id = ? AND ri.is_collected = 0 AND r.semester_id = ?");
+    $stmt->bind_param("ii", $selected_book_id, $semester_id);
+    $stmt->execute();
+    $res = $stmt->get_result();
+    if ($res && $res->num_rows === 1) {
+        $selected_yet_students = intval($res->fetch_assoc()['c']);
+    }
+}
+
+$selected_received_result = null;
+$selected_payments_result = null;
+if ($selected_book_id > 0) {
+    $admin_cond = $is_super_admin ? "" : " AND admin_id = $current_admin_id";
+    $stmt = $conn->prepare("SELECT * FROM books_received WHERE book_id = ? AND semester_id = ? $admin_cond ORDER BY receive_date DESC, created_at DESC LIMIT 50");
+    $stmt->bind_param("ii", $selected_book_id, $semester_id);
+    $stmt->execute();
+    $selected_received_result = $stmt->get_result();
+
+    $stmt = $conn->prepare("SELECT * FROM lecturer_payments WHERE book_id = ? AND semester_id = ? $admin_cond ORDER BY payment_date DESC, created_at DESC LIMIT 50");
+    $stmt->bind_param("ii", $selected_book_id, $semester_id);
+    $stmt->execute();
+    $selected_payments_result = $stmt->get_result();
+}
+
+// Fetch recent books received
+$admin_filter_sql = $is_super_admin ? '' : "AND br.admin_id = {$current_admin_id}";
+$received_sql = "
+    SELECT br.*, b.book_title 
+    FROM books_received br
+    JOIN books b ON br.book_id = b.book_id
+    WHERE br.semester_id = {$semester_id} {$admin_filter_sql}
+    ORDER BY br.receive_date DESC, br.created_at DESC
+    LIMIT 10
+";
+$received_result = $conn->query($received_sql);
+
 // Fetch recent lecturer payments
+$admin_filter_lp = $is_super_admin ? '' : "AND lp.admin_id = {$current_admin_id}";
 $payments_sql = "
     SELECT lp.*, b.book_title 
     FROM lecturer_payments lp
     JOIN books b ON lp.book_id = b.book_id
+    WHERE lp.semester_id = {$semester_id} {$admin_filter_lp}
     ORDER BY lp.payment_date DESC, lp.created_at DESC
-    LIMIT 20
+    LIMIT 10
 ";
 $payments_result = $conn->query($payments_sql);
 
 // Fetch books for dropdown
 $dropdown_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY book_title ASC");
+$dropdown_books2 = $conn->query("SELECT book_id, book_title FROM books ORDER BY book_title ASC");
+$filter_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY book_title ASC");
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -224,53 +441,212 @@ $dropdown_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY b
             <h1>💰 Lecturer Payments</h1>
             <p class="subtitle">Track payments made to lecturers for each book</p>
         </div>
-        <a href="admin.php" class="back-btn">← Back to Dashboard</a>
+        <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap; justify-content: flex-end;">
+            <form method="GET" style="margin: 0;">
+                <select name="book_id" onchange="this.form.submit()" style="padding: 10px 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.35); background: rgba(255,255,255,0.18); color: white; font-weight: 600;">
+                    <option value="" style="color:#333;">Filter by book...</option>
+                    <?php while ($b = $filter_books->fetch_assoc()): ?>
+                        <option value="<?php echo intval($b['book_id']); ?>" <?php echo ($selected_book_id === intval($b['book_id'])) ? 'selected' : ''; ?> style="color:#333;">
+                            <?php echo htmlspecialchars($b['book_title']); ?>
+                        </option>
+                    <?php endwhile; ?>
+                </select>
+            </form>
+            <?php if ($selected_book_id > 0): ?>
+                <div style="display:flex; flex-direction: column; gap: 4px; align-items: flex-end;">
+                    <div style="font-weight: 700; font-size: 12px; opacity: 0.95; max-width: 320px; text-align: right;">
+                        <?php echo htmlspecialchars($selected_book_title); ?>
+                    </div>
+                    <div style="display:flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end;">
+                        <span style="background: rgba(40,167,69,0.18); border: 1px solid rgba(40,167,69,0.35); padding: 6px 10px; border-radius: 999px; font-weight: 700; font-size: 12px;">
+                            Received: <?php echo number_format($selected_received_students); ?>
+                        </span>
+                        <span style="background: rgba(220,53,69,0.18); border: 1px solid rgba(220,53,69,0.35); padding: 6px 10px; border-radius: 999px; font-weight: 700; font-size: 12px;">
+                            Yet: <?php echo number_format($selected_yet_students); ?>
+                        </span>
+                    </div>
+                </div>
+            <?php endif; ?>
+            <a href="admin.php" class="back-btn">← Back to Dashboard</a>
+        </div>
     </div>
     
     <?php
     // Calculate totals
-    $total_collected = 0;
+    $total_received = 0;
+    $total_sold = 0;
     $total_paid_to_lecturers = 0;
-    $total_copies_sold = 0;
+    $total_due_to_lecturers = 0;
     
     if ($books_result && $books_result->num_rows > 0) {
         $books_result->data_seek(0);
         while ($row = $books_result->fetch_assoc()) {
-            $total_collected += $row['sold_paid_amount'];
+            $total_received += $row['received_copies'];
+            $total_sold += $row['sold_copies'];
             $total_paid_to_lecturers += $row['lecturer_paid_amount'];
-            $total_copies_sold += $row['sold_copies'];
+            $total_due_to_lecturers += (floatval($row['received_copies']) * floatval($row['price']));
         }
         $books_result->data_seek(0);
     }
-    $outstanding = $total_collected - $total_paid_to_lecturers;
+    $remaining_stock = $total_received - $total_sold;
+    $unpaid_to_lecturer = $total_due_to_lecturers - $total_paid_to_lecturers;
+    $is_overpaid_total = $unpaid_to_lecturer < 0;
     ?>
     
-    <div class="stats-grid">
-        <div class="stat-card green">
-            <div class="label">Total Collected</div>
-            <div class="value">GH₵ <?php echo number_format($total_collected, 2); ?></div>
-        </div>
+    <div class="stats-grid" style="grid-template-columns: repeat(4, 1fr);">
         <div class="stat-card blue">
+            <div class="label">Books Received</div>
+            <div class="value"><?php echo number_format($total_received); ?> copies</div>
+        </div>
+        <div class="stat-card green">
+            <div class="label">Books Sold (Given Out)</div>
+            <div class="value"><?php echo number_format($total_sold); ?> copies</div>
+        </div>
+        <div class="stat-card" style="--card-color: #6f42c1;">
             <div class="label">Paid to Lecturers</div>
-            <div class="value">GH₵ <?php echo number_format($total_paid_to_lecturers, 2); ?></div>
+            <div class="value" style="color: #6f42c1;">GH₵ <?php echo number_format($total_paid_to_lecturers, 2); ?></div>
         </div>
         <div class="stat-card red">
-            <div class="label">Outstanding</div>
-            <div class="value">GH₵ <?php echo number_format($outstanding, 2); ?></div>
+            <div class="label">Unpaid to Lecturers</div>
+            <div class="value">
+                <?php if ($is_overpaid_total): ?>
+                    Overpaid GH₵ <?php echo number_format(abs($unpaid_to_lecturer), 2); ?>
+                <?php else: ?>
+                    GH₵ <?php echo number_format($unpaid_to_lecturer, 2); ?>
+                <?php endif; ?>
+            </div>
         </div>
     </div>
+
+    <?php if ($selected_book_id > 0): ?>
+        <div class="stats-grid" style="grid-template-columns: repeat(3, 1fr);">
+            <div class="stat-card blue">
+                <div class="label">Selected Book</div>
+                <div class="value" style="font-size: 16px; font-weight: 700; color: #17a2b8;">
+                    <?php echo htmlspecialchars($selected_book_title); ?>
+                </div>
+            </div>
+            <div class="stat-card green">
+                <div class="label">Students Received</div>
+                <div class="value"><?php echo number_format($selected_received_students); ?></div>
+            </div>
+            <div class="stat-card red">
+                <div class="label">Students Yet to Receive</div>
+                <div class="value"><?php echo number_format($selected_yet_students); ?></div>
+            </div>
+        </div>
+    <?php endif; ?>
+
+    <?php if ($selected_book_id > 0): ?>
+        <div class="card" style="margin-top: 25px;">
+            <h3>✏️ Edit Records — <?php echo htmlspecialchars($selected_book_title); ?></h3>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th colspan="5">Books Received</th>
+                        </tr>
+                        <tr>
+                            <th>Date</th>
+                            <th>Copies</th>
+                            <th>Lecturer</th>
+                            <th>Notes</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php if ($selected_received_result && $selected_received_result->num_rows > 0): ?>
+                            <?php while ($row = $selected_received_result->fetch_assoc()): ?>
+                                <tr>
+                                    <form method="POST">
+                                        <td>
+                                            <input type="date" name="receive_date" value="<?php echo htmlspecialchars($row['receive_date']); ?>" required>
+                                        </td>
+                                        <td>
+                                            <input type="number" name="copies_received" step="1" value="<?php echo intval($row['copies_received']); ?>" required>
+                                        </td>
+                                        <td>
+                                            <input type="text" name="lecturer_name" value="<?php echo htmlspecialchars($row['lecturer_name'] ?? ''); ?>">
+                                        </td>
+                                        <td>
+                                            <input type="text" name="notes" value="<?php echo htmlspecialchars($row['notes'] ?? ''); ?>">
+                                        </td>
+                                        <td>
+                                            <input type="hidden" name="receive_id" value="<?php echo intval($row['receive_id']); ?>">
+                                            <input type="hidden" name="book_id" value="<?php echo intval($selected_book_id); ?>">
+                                            <button type="submit" name="update_received" class="btn btn-primary" style="width: auto; padding: 10px 14px;">Update</button>
+                                            <button type="submit" name="delete_received" class="btn btn-primary" style="width: auto; padding: 10px 14px; background: #dc3545;" onclick="return confirm('Delete this received entry?');">Delete</button>
+                                        </td>
+                                    </form>
+                                </tr>
+                            <?php endwhile; ?>
+                        <?php else: ?>
+                            <tr><td colspan="5" style="text-align:center; color:#666;">No received records for this book.</td></tr>
+                        <?php endif; ?>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="table-container" style="margin-top: 18px;">
+                <table>
+                    <thead>
+                        <tr>
+                            <th colspan="5">Payments to Lecturer</th>
+                        </tr>
+                        <tr>
+                            <th>Date</th>
+                            <th>Copies</th>
+                            <th>Amount (GH₵)</th>
+                            <th>Notes</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php if ($selected_payments_result && $selected_payments_result->num_rows > 0): ?>
+                            <?php while ($row = $selected_payments_result->fetch_assoc()): ?>
+                                <tr>
+                                    <form method="POST">
+                                        <td>
+                                            <input type="date" name="payment_date" value="<?php echo htmlspecialchars($row['payment_date']); ?>" required>
+                                        </td>
+                                        <td>
+                                            <input type="number" name="copies_paid" step="1" value="<?php echo intval($row['copies_paid']); ?>" required>
+                                        </td>
+                                        <td>
+                                            <input type="number" name="amount_paid" step="0.01" value="<?php echo htmlspecialchars($row['amount_paid']); ?>" required>
+                                        </td>
+                                        <td>
+                                            <input type="text" name="notes" value="<?php echo htmlspecialchars($row['notes'] ?? ''); ?>">
+                                        </td>
+                                        <td>
+                                            <input type="hidden" name="payment_id" value="<?php echo intval($row['payment_id']); ?>">
+                                            <input type="hidden" name="book_id" value="<?php echo intval($selected_book_id); ?>">
+                                            <button type="submit" name="update_payment" class="btn btn-primary" style="width: auto; padding: 10px 14px;">Update</button>
+                                            <button type="submit" name="delete_payment" class="btn btn-primary" style="width: auto; padding: 10px 14px; background: #dc3545;" onclick="return confirm('Delete this payment entry?');">Delete</button>
+                                        </td>
+                                    </form>
+                                </tr>
+                            <?php endwhile; ?>
+                        <?php else: ?>
+                            <tr><td colspan="5" style="text-align:center; color:#666;">No payment records for this book.</td></tr>
+                        <?php endif; ?>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    <?php endif; ?>
     
+    <?php if ($success_msg): ?>
+        <div class="alert alert-success"><?php echo $success_msg; ?></div>
+    <?php endif; ?>
+    <?php if ($error_msg): ?>
+        <div class="alert alert-error"><?php echo $error_msg; ?></div>
+    <?php endif; ?>
+
     <div class="grid-2">
-        <!-- Record Payment Form -->
+        <!-- Record Books Received Form -->
         <div class="card">
-            <h3>💰 Record Payment to Lecturer</h3>
-            
-            <?php if ($success_msg): ?>
-                <div class="alert alert-success"><?php echo $success_msg; ?></div>
-            <?php endif; ?>
-            <?php if ($error_msg): ?>
-                <div class="alert alert-error"><?php echo $error_msg; ?></div>
-            <?php endif; ?>
+            <h3>📦 Record Books Received from Lecturer</h3>
             
             <form method="POST">
                 <div class="form-group">
@@ -286,13 +662,54 @@ $dropdown_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY b
                 </div>
                 
                 <div class="form-group">
+                    <label>Number of Copies Received *</label>
+                    <input type="number" name="copies_received" step="1" required placeholder="e.g. 50 (use -50 to correct)">
+                </div>
+                
+                <div class="form-group">
+                    <label>Date Received *</label>
+                    <input type="date" name="receive_date" value="<?php echo date('Y-m-d'); ?>" required>
+                </div>
+                
+                <div class="form-group">
+                    <label>Lecturer Name (Optional)</label>
+                    <input type="text" name="lecturer_name" placeholder="e.g. Dr. Mensah">
+                </div>
+                
+                <div class="form-group">
+                    <label>Notes (Optional)</label>
+                    <textarea name="notes" placeholder="e.g. First batch for semester"></textarea>
+                </div>
+                
+                <button type="submit" name="record_received" class="btn btn-primary" style="background: linear-gradient(135deg, #17a2b8 0%, #138496 100%);">📦 Record Books Received</button>
+            </form>
+        </div>
+        
+        <!-- Record Payment Form -->
+        <div class="card">
+            <h3>💰 Record Payment to Lecturer</h3>
+            
+            <form method="POST">
+                <div class="form-group">
+                    <label>Select Book *</label>
+                    <select name="book_id" required>
+                        <option value="">-- Choose a book --</option>
+                        <?php while ($book = $dropdown_books2->fetch_assoc()): ?>
+                            <option value="<?php echo $book['book_id']; ?>">
+                                <?php echo htmlspecialchars($book['book_title']); ?>
+                            </option>
+                        <?php endwhile; ?>
+                    </select>
+                </div>
+                
+                <div class="form-group">
                     <label>Number of Copies Paid For *</label>
-                    <input type="number" name="copies_paid" min="1" required placeholder="e.g. 15">
+                    <input type="number" name="copies_paid" step="1" required placeholder="e.g. 15 (use -15 to correct)">
                 </div>
                 
                 <div class="form-group">
                     <label>Amount Paid (GH₵) *</label>
-                    <input type="number" step="0.01" name="amount_paid" min="0.01" required placeholder="e.g. 150.00">
+                    <input type="number" step="0.01" name="amount_paid" required placeholder="e.g. 150.00 (use -150.00 to correct)">
                 </div>
                 
                 <div class="form-group">
@@ -305,55 +722,90 @@ $dropdown_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY b
                     <textarea name="notes" placeholder="e.g. Paid via MoMo to Dr. Mensah"></textarea>
                 </div>
                 
-                <button type="submit" name="record_payment" class="btn btn-primary">Record Payment</button>
+                <button type="submit" name="record_payment" class="btn btn-primary">💰 Record Payment</button>
             </form>
+        </div>
+    </div>
+    
+    <div class="grid-2">
+        <!-- Recent Books Received -->
+        <div class="card">
+            <h3>📦 Recent Books Received</h3>
+            <?php if ($received_result && $received_result->num_rows > 0): ?>
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Date</th>
+                                <th>Book</th>
+                                <th>Copies</th>
+                                <th>Lecturer</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php while ($received = $received_result->fetch_assoc()): ?>
+                                <tr>
+                                    <td><?php echo date('M d, Y', strtotime($received['receive_date'])); ?></td>
+                                    <td><?php echo htmlspecialchars($received['book_title']); ?></td>
+                                    <td><?php echo $received['copies_received']; ?></td>
+                                    <td><?php echo htmlspecialchars($received['lecturer_name'] ?: '—'); ?></td>
+                                </tr>
+                            <?php endwhile; ?>
+                        </tbody>
+                    </table>
+                </div>
+            <?php else: ?>
+                <p style="color: #666; text-align: center;">No books received recorded yet.</p>
+            <?php endif; ?>
         </div>
         
         <!-- Recent Payments -->
         <div class="card">
-            <h3>📋 Recent Payments</h3>
+            <h3>💰 Recent Payments to Lecturers</h3>
             <?php if ($payments_result && $payments_result->num_rows > 0): ?>
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Date</th>
-                            <th>Book</th>
-                            <th>Copies</th>
-                            <th>Amount</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php while ($payment = $payments_result->fetch_assoc()): ?>
+                <div class="table-container">
+                    <table>
+                        <thead>
                             <tr>
-                                <td><?php echo date('M d, Y', strtotime($payment['payment_date'])); ?></td>
-                                <td><?php echo htmlspecialchars($payment['book_title']); ?></td>
-                                <td><?php echo $payment['copies_paid']; ?></td>
-                                <td>GH₵ <?php echo number_format($payment['amount_paid'], 2); ?></td>
+                                <th>Date</th>
+                                <th>Book</th>
+                                <th>Copies</th>
+                                <th>Amount</th>
                             </tr>
-                        <?php endwhile; ?>
-                    </tbody>
-                </table>
+                        </thead>
+                        <tbody>
+                            <?php while ($payment = $payments_result->fetch_assoc()): ?>
+                                <tr>
+                                    <td><?php echo date('M d, Y', strtotime($payment['payment_date'])); ?></td>
+                                    <td><?php echo htmlspecialchars($payment['book_title']); ?></td>
+                                    <td><?php echo $payment['copies_paid']; ?></td>
+                                    <td>GH₵ <?php echo number_format($payment['amount_paid'], 2); ?></td>
+                                </tr>
+                            <?php endwhile; ?>
+                        </tbody>
+                    </table>
+                </div>
             <?php else: ?>
                 <p style="color: #666; text-align: center;">No payments recorded yet.</p>
             <?php endif; ?>
         </div>
     </div>
     
-    <!-- Book Sales Summary -->
+    <!-- Book Inventory & Payment Summary -->
     <div class="card">
-        <h3>📊 Book Sales & Payment Summary</h3>
+        <h3>📊 Book Inventory & Payment Summary</h3>
+        <div class="table-container">
         <table>
             <thead>
                 <tr>
                     <th>Book Title</th>
                     <th>Price</th>
-                    <th>Copies Sold (Collected)</th>
-                    <th>Copies Sold & Paid</th>
-                    <th>Total Collected</th>
-                    <th>Copies Paid to Lecturer</th>
-                    <th>Amount Paid to Lecturer</th>
-                    <th>Outstanding</th>
-                    <th>Progress</th>
+                    <th>Received</th>
+                    <th>Sold (Given Out)</th>
+                    <th>Remaining</th>
+                    <th>Paid to Lecturer</th>
+                    <th>Unpaid to Lecturer</th>
+                    <th>Payment Progress</th>
                 </tr>
             </thead>
             <tbody>
@@ -361,21 +813,31 @@ $dropdown_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY b
                     <?php $books_result->data_seek(0); ?>
                     <?php while ($book = $books_result->fetch_assoc()): ?>
                         <?php
-                        $book_outstanding = $book['sold_paid_amount'] - $book['lecturer_paid_amount'];
-                        $progress = $book['sold_paid_amount'] > 0 
-                            ? min(100, ($book['lecturer_paid_amount'] / $book['sold_paid_amount']) * 100) 
-                            : 0;
+                        $received = intval($book['received_copies']);
+                        $sold = intval($book['sold_copies']);
+                        $remaining_raw = $received - $sold;
+                        $remaining = max(0, $remaining_raw);
+                        $due_amount = floatval($received) * floatval($book['price']);
+                        $paid_amount = floatval($book['lecturer_paid_amount']);
+                        $unpaid_amount = $due_amount - $paid_amount;
+                        $is_overpaid = $unpaid_amount < 0;
+                        $progress = $due_amount > 0 ? min(100, ($paid_amount / $due_amount) * 100) : 0;
                         ?>
                         <tr>
-                            <td><strong><?php echo htmlspecialchars($book['book_title']); ?></strong></td>
+                            <td><strong><a href="lecturer_payments.php?book_id=<?php echo intval($book['book_id']); ?>" style="color: inherit; text-decoration: underline;"><?php echo htmlspecialchars($book['book_title']); ?></a></strong></td>
                             <td>GH₵ <?php echo number_format($book['price'], 2); ?></td>
-                            <td><?php echo $book['sold_copies']; ?></td>
-                            <td><?php echo $book['sold_paid_copies']; ?></td>
-                            <td class="stat-positive">GH₵ <?php echo number_format($book['sold_paid_amount'], 2); ?></td>
-                            <td><?php echo $book['lecturer_paid_copies']; ?></td>
-                            <td style="color: #007bff;">GH₵ <?php echo number_format($book['lecturer_paid_amount'], 2); ?></td>
-                            <td class="<?php echo $book_outstanding > 0 ? 'stat-danger' : 'stat-positive'; ?>">
-                                GH₵ <?php echo number_format($book_outstanding, 2); ?>
+                            <td style="color: #17a2b8; font-weight: 600;"><?php echo $received; ?></td>
+                            <td style="color: #28a745; font-weight: 600;"><?php echo $sold; ?></td>
+                            <td style="color: <?php echo $remaining_raw < 0 ? '#dc3545' : '#666'; ?>; font-weight: 600;">
+                                <?php echo $remaining; ?>
+                            </td>
+                            <td style="color: #6f42c1; font-weight: 600;">GH₵ <?php echo number_format($paid_amount, 2); ?></td>
+                            <td class="<?php echo $unpaid_amount > 0 ? 'stat-danger' : 'stat-positive'; ?>">
+                                <?php if ($is_overpaid): ?>
+                                    Overpaid GH₵ <?php echo number_format(abs($unpaid_amount), 2); ?>
+                                <?php else: ?>
+                                    GH₵ <?php echo number_format($unpaid_amount, 2); ?>
+                                <?php endif; ?>
                             </td>
                             <td style="min-width: 100px;">
                                 <div class="progress-bar">
@@ -390,7 +852,11 @@ $dropdown_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY b
                 <?php endif; ?>
             </tbody>
         </table>
+        </div>
     </div>
 </div>
+
+<?php include 'footer.php'; ?>
+
 </body>
 </html>

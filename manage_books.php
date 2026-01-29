@@ -346,5 +346,9 @@ $books = $conn->query("SELECT * FROM books ORDER BY book_title ASC");
     </div>
 </div>
 
+</div>
+
+<?php include 'footer.php'; ?>
+
 </body>
 </html>

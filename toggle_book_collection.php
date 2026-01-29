@@ -1,6 +1,11 @@
 <?php
 session_start();
 if (!isset($_SESSION['admin_logged_in'])) {
+    if (isset($_GET['ajax'])) {
+        header('Content-Type: application/json');
+        echo json_encode(['success' => false, 'error' => 'Not logged in']);
+        exit;
+    }
     header('Location: admin.php');
     exit;
 }
@@ -9,43 +14,30 @@ include 'db.php';
 if(isset($_GET['item_id'])) {
     $item_id = intval($_GET['item_id']);
     
-    $itemRes = $conn->query("SELECT book_id, is_collected FROM request_items WHERE item_id = $item_id LIMIT 1");
-    if (!$itemRes || $itemRes->num_rows !== 1) {
-        header("Location: view_request.php");
+    // Simply toggle is_collected (no stock restriction)
+    $result = $conn->query("UPDATE request_items SET is_collected = 1 - is_collected WHERE item_id = $item_id");
+    
+    if (!$result) {
+        if (isset($_GET['ajax'])) {
+            header('Content-Type: application/json');
+            echo json_encode(['success' => false, 'error' => 'Toggle failed']);
+            exit;
+        }
+        header("Location: view_request.php?msg=toggle_failed");
         exit;
     }
 
-    $itemRow = $itemRes->fetch_assoc();
-    $book_id = intval($itemRow['book_id']);
-    $current = intval($itemRow['is_collected']);
-    $next = ($current === 1) ? 0 : 1;
+    // Get new status
+    $status_result = $conn->query("SELECT is_collected FROM request_items WHERE item_id = $item_id");
+    $new_status = 0;
+    if ($status_result && $status_result->num_rows === 1) {
+        $new_status = intval($status_result->fetch_assoc()['is_collected']);
+    }
 
-    $conn->begin_transaction();
-    try {
-        if ($next === 1) {
-            $stockRes = $conn->query("SELECT stock_quantity FROM books WHERE book_id = $book_id LIMIT 1 FOR UPDATE");
-            if (!$stockRes || $stockRes->num_rows !== 1) {
-                throw new Exception('Book not found');
-            }
-            $stockRow = $stockRes->fetch_assoc();
-            $stock = intval($stockRow['stock_quantity']);
-            if ($stock <= 0) {
-                $conn->rollback();
-                header("Location: view_request.php?msg=out_of_stock");
-                exit;
-            }
-
-            $conn->query("UPDATE request_items SET is_collected = 1 WHERE item_id = $item_id");
-            $conn->query("UPDATE books SET stock_quantity = stock_quantity - 1 WHERE book_id = $book_id");
-        } else {
-            $conn->query("UPDATE request_items SET is_collected = 0 WHERE item_id = $item_id");
-            $conn->query("UPDATE books SET stock_quantity = stock_quantity + 1 WHERE book_id = $book_id");
-        }
-
-        $conn->query("UPDATE books SET availability = IF(stock_quantity <= 0, 'out_of_stock', 'available') WHERE book_id = $book_id");
-        $conn->commit();
-    } catch (Throwable $e) {
-        $conn->rollback();
+    if (isset($_GET['ajax'])) {
+        header('Content-Type: application/json');
+        echo json_encode(['success' => true, 'is_collected' => $new_status]);
+        exit;
     }
 
     header("Location: view_request.php");

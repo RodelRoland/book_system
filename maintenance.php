@@ -174,5 +174,7 @@ if (isset($_POST['clear_students'])) {
     </div>
 </div>
 
+<?php include 'footer.php'; ?>
+
 </body>
 </html>

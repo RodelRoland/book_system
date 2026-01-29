@@ -10,6 +10,8 @@ if (!isset($_SESSION['admin_logged_in'])) {
 // Fetch available books
 $books_res = $conn->query("SELECT * FROM books WHERE availability = 'available'");
 
+$semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $full_name = $conn->real_escape_string($_POST['full_name']);
     $index_number = $conn->real_escape_string($_POST['index_number']);
@@ -26,7 +28,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                           JOIN requests r ON ri.request_id = r.request_id
                           JOIN students s ON r.student_id = s.student_id
                           JOIN books b ON ri.book_id = b.book_id
-                          WHERE s.index_number = '$index_number' AND ri.book_id = '$book_id'";
+                          WHERE r.semester_id = $semester_id AND s.index_number = '$index_number' AND ri.book_id = '$book_id'";
             
             $check_res = $conn->query($check_sql);
             if ($check_res && $check_res->num_rows > 0) {
@@ -68,8 +70,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             // Update student's credit balance
             $conn->query("UPDATE students SET credit_balance = $new_credit WHERE student_id = $student_id");
 
-            $sql_request = "INSERT INTO requests (student_id, total_amount, amount_paid, payment_status, created_at) 
-                            VALUES ('$student_id', '$total_amount', '$amount_paid', 'paid', NOW())";
+            $semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
+            $admin_id = intval($_SESSION['admin_id'] ?? 0);
+            $sql_request = "INSERT INTO requests (student_id, total_amount, amount_paid, payment_status, created_at, semester_id, admin_id) 
+                            VALUES ('$student_id', '$total_amount', '$amount_paid', 'paid', NOW(), '$semester_id', '$admin_id')";
             
             if ($conn->query($sql_request)) {
                 $request_id = $conn->insert_id;
@@ -330,19 +334,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <script>
 document.getElementById('index_number').addEventListener('blur', function() {
     const index = this.value;
+    const nameInput = document.getElementById('full_name');
+    const phoneInput = document.getElementById('phone');
+    
     if (index.length > 2) {
-        fetch('get_student_credit.php?index=' + encodeURIComponent(index))
+        // First, try class_students table (rep's uploaded roster)
+        fetch('ajax_student_lookup.php?index=' + encodeURIComponent(index))
         .then(response => response.json())
         .then(data => {
-            const nameInput = document.getElementById('full_name');
-            const phoneInput = document.getElementById('phone');
-            if (data.found) {
-                nameInput.value = data.full_name;
+            if (data.success && data.student_name) {
+                nameInput.value = data.student_name;
                 nameInput.classList.add('valid');
-                if (data.phone) phoneInput.value = data.phone;
+                nameInput.readOnly = false;
             } else {
-                nameInput.value = '';
-                nameInput.classList.remove('valid');
+                // Fall back to existing students table
+                return fetch('get_student_credit.php?index=' + encodeURIComponent(index))
+                    .then(response => response.json())
+                    .then(data2 => {
+                        if (data2.found) {
+                            nameInput.value = data2.full_name;
+                            nameInput.classList.add('valid');
+                            if (data2.phone) phoneInput.value = data2.phone;
+                        } else {
+                            nameInput.value = '';
+                            nameInput.classList.remove('valid');
+                            nameInput.readOnly = false;
+                            nameInput.placeholder = 'Enter student name manually';
+                        }
+                    });
             }
         });
     }
@@ -363,6 +382,8 @@ function calculateTotal() {
 
 checkboxes.forEach(cb => cb.addEventListener('change', calculateTotal));
 </script>
+
+<?php include 'footer.php'; ?>
 
 </body>
 </html>

@@ -89,7 +89,21 @@ $conn->query("
     )
 ");
 
-// ── 7. Add indexes for better performance
+// ── 7. books_received (track books received/taken from lecturers)
+$conn->query("
+    CREATE TABLE IF NOT EXISTS books_received (
+        receive_id      INT AUTO_INCREMENT PRIMARY KEY,
+        book_id         INT NOT NULL,
+        copies_received INT NOT NULL,
+        receive_date    DATE NOT NULL,
+        lecturer_name   VARCHAR(100) NULL,
+        notes           VARCHAR(255) NULL,
+        created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (book_id) REFERENCES books(book_id) ON DELETE CASCADE
+    )
+");
+
+// ── 8. Add indexes for better performance
 function ensure_index($conn, $table, $indexName, $createSql) {
     $check = $conn->query("SHOW INDEX FROM `$table` WHERE Key_name = '$indexName'");
     if ($check && $check->num_rows === 0) {

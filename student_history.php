@@ -4,6 +4,8 @@ require_once 'db.php';
 
 if (!isset($_SESSION['admin_logged_in'])) { header('Location: admin.php'); exit; }
 
+$semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
+
 $index = $conn->real_escape_string($_GET['index']);
 
 // Updated SQL to include amount_paid for balance calculation
@@ -13,7 +15,7 @@ $sql = "SELECT r.created_at, r.total_amount, r.amount_paid, r.payment_status,
         JOIN students s ON r.student_id = s.student_id
         JOIN request_items ri ON r.request_id = ri.request_id
         JOIN books b ON ri.book_id = b.book_id
-        WHERE s.index_number = '$index'
+        WHERE s.index_number = '$index' AND r.semester_id = $semester_id
         GROUP BY r.request_id
         ORDER BY r.created_at DESC";
 
@@ -207,6 +209,8 @@ $grand_total_paid = 0;
         </div>
     </div>
 </div>
+
+<?php include 'footer.php'; ?>
 
 </body>
 </html>

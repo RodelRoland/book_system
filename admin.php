@@ -2,6 +2,8 @@
 session_start();
 require_once 'db.php';
 
+$semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
+
 // 1. Handle Logout
 if (isset($_GET['logout'])) {
     session_destroy();
@@ -9,31 +11,42 @@ if (isset($_GET['logout'])) {
     exit;
 }
 
-$error = '';
-
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $username = $_POST['username'] ?? ''; 
-    $password = $_POST['password'] ?? ''; 
-
-    // Authenticate against admins table
-    $stmt = $conn->prepare("SELECT admin_id, username, password FROM admins WHERE username = ?");
-    $stmt->bind_param("s", $username);
-    $stmt->execute();
-    $result = $stmt->get_result();
-    
-    if ($result->num_rows === 1) {
-        $admin = $result->fetch_assoc();
-        // Check password (supports both hashed and plain text for backwards compatibility)
-        if (password_verify($password, $admin['password']) || $password === $admin['password']) {
-            $_SESSION['admin_logged_in'] = true;
-            $_SESSION['admin_id'] = $admin['admin_id'];
-            $_SESSION['admin_username'] = $admin['username'];
-            header("Location: admin.php");
-            exit;
-        }
+if (isset($_SESSION['admin_logged_in']) && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['set_active_semester'])) {
+    $new_id = intval($_POST['semester_id']);
+    if ($new_id > 0) {
+        $conn->query("UPDATE semesters SET is_active = 0");
+        $stmt = $conn->prepare("UPDATE semesters SET is_active = 1 WHERE semester_id = ?");
+        $stmt->bind_param("i", $new_id);
+        $stmt->execute();
     }
-    $error = "Invalid username or password.";
+    header("Location: admin.php");
+    exit;
 }
+
+if (isset($_SESSION['admin_logged_in']) && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['create_semester'])) {
+    $name = trim($_POST['semester_name'] ?? '');
+    if ($name !== '') {
+        $conn->query("UPDATE semesters SET is_active = 0");
+        $stmt = $conn->prepare("INSERT INTO semesters (semester_name, is_active) VALUES (?, 1) ON DUPLICATE KEY UPDATE is_active = 1");
+        $stmt->bind_param("s", $name);
+        $stmt->execute();
+    }
+    header("Location: admin.php");
+    exit;
+}
+
+// Redirect to login if not logged in
+if (!isset($_SESSION['admin_logged_in'])) {
+    header('Location: login.php');
+    exit;
+}
+
+// Get current admin info
+$current_admin_id = intval($_SESSION['admin_id'] ?? 0);
+$current_admin_role = $_SESSION['admin_role'] ?? 'rep';
+$current_admin_class = $_SESSION['admin_class_name'] ?? '';
+$is_super_admin = ($current_admin_role === 'super_admin');
+
 ?>
 
 <!DOCTYPE html>
@@ -254,37 +267,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 </head>
 <body>
 
-<?php if (!isset($_SESSION['admin_logged_in'])): ?>
-    
-    <div class="login-container">
-        <h2>Admin Login</h2>
-        <?php if ($error !== ''): ?>
-            <div class="error-msg"><?php echo $error; ?></div>
-        <?php endif; ?>
-        <form method="post">
-            <div class="form-group">
-                <label>Username</label>
-                <input type="text" name="username" placeholder="Enter username" required>
-            </div>
-            <div class="form-group">
-                <label>Password</label>
-                <input type="password" name="password" placeholder="Enter password" required>
-            </div>
-            <button type="submit" class="login-btn">Sign In</button>
-        </form>
-    </div>
-
-<?php else: ?>
-
-    <?php
-        // Fetch Total Collected Revenue
-        $rev_q = "SELECT SUM(total_amount) AS total FROM requests WHERE payment_status = 'paid'";
+<?php
+        // Fetch Total Collected Revenue (scoped by admin_id for reps, all for super_admin)
+        $semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
+        $admin_filter = $is_super_admin ? '' : "AND admin_id = $current_admin_id";
+        
+        $rev_q = "SELECT SUM(total_amount) AS total FROM requests WHERE payment_status = 'paid' AND semester_id = $semester_id $admin_filter";
         $rev_res = $conn->query($rev_q);
         $rev_data = $rev_res->fetch_assoc();
         $total_collected = $rev_data['total'] ?? 0;
 
         // Fetch Total Paid to Lecturers
-        $lec_q = "SELECT SUM(amount_paid) AS total FROM lecturer_payments";
+        $lec_q = "SELECT SUM(amount_paid) AS total FROM lecturer_payments WHERE semester_id = $semester_id $admin_filter";
         $lec_res = $conn->query($lec_q);
         $lec_data = $lec_res->fetch_assoc();
         $paid_to_lecturers = $lec_data['total'] ?? 0;
@@ -293,19 +287,50 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $net_balance = $total_collected - $paid_to_lecturers;
 
         // Fetch Pending Count
-        $pen_q = "SELECT COUNT(*) AS count FROM requests WHERE payment_status = 'unpaid'";
+        $pen_q = "SELECT COUNT(*) AS count FROM requests WHERE payment_status = 'unpaid' AND semester_id = $semester_id $admin_filter";
         $pen_res = $conn->query($pen_q);
         $pen_data = $pen_res->fetch_assoc();
         $total_pending = $pen_data['count'] ?? 0;
+
+        $semesters_result = $conn->query("SELECT semester_id, semester_name, is_active FROM semesters ORDER BY semester_id DESC");
+        $active_semester_name = '';
+        if ($semesters_result) {
+            $semesters_result->data_seek(0);
+            while ($s = $semesters_result->fetch_assoc()) {
+                if (intval($s['is_active']) === 1) {
+                    $active_semester_name = $s['semester_name'];
+                    break;
+                }
+            }
+            $semesters_result->data_seek(0);
+        }
     ?>
 
     <div class="dashboard-container">
         <div class="dashboard-header">
             <div>
-                <h1>Welcome, <?php echo htmlspecialchars($_SESSION['admin_username']); ?></h1>
-                <p class="subtitle">Book Distribution Management System</p>
+                <h1>Welcome, <?php echo htmlspecialchars($_SESSION['admin_full_name'] ?? $_SESSION['admin_username']); ?></h1>
+                <p class="subtitle"><?php echo $is_super_admin ? '👑 Super Admin' : '📋 ' . htmlspecialchars($current_admin_class ?: 'Class Rep'); ?><?php echo $active_semester_name ? ' • ' . htmlspecialchars($active_semester_name) : ''; ?></p>
             </div>
-            <a href="?logout=1" class="logout-btn">Logout</a>
+            <div style="display:flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: flex-end;">
+                <form method="POST" style="margin: 0;">
+                    <select name="semester_id" onchange="this.form.submit()" style="padding: 10px 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.35); background: rgba(255,255,255,0.18); color: white; font-weight: 700;">
+                        <?php if ($semesters_result): ?>
+                            <?php while ($s = $semesters_result->fetch_assoc()): ?>
+                                <option value="<?php echo intval($s['semester_id']); ?>" <?php echo intval($s['is_active']) === 1 ? 'selected' : ''; ?> style="color:#333;">
+                                    <?php echo htmlspecialchars($s['semester_name']); ?>
+                                </option>
+                            <?php endwhile; ?>
+                        <?php endif; ?>
+                    </select>
+                    <input type="hidden" name="set_active_semester" value="1">
+                </form>
+                <form method="POST" style="margin: 0; display:flex; gap: 8px; align-items:center;">
+                    <input type="text" name="semester_name" placeholder="New semester name" required style="padding: 10px 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.35); background: rgba(255,255,255,0.18); color: white; font-weight: 700; width: 180px;">
+                    <button type="submit" name="create_semester" value="1" class="logout-btn" style="padding: 10px 14px;">Create</button>
+                </form>
+                <a href="?logout=1" class="logout-btn">Logout</a>
+            </div>
         </div>
         
         <div class="stats-grid">
@@ -365,11 +390,50 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         <p>System reset options</p>
                     </div>
                 </a>
+                <a href="upload_class.php" class="menu-item" style="background: #e8f5e9;">
+                    <div class="icon" style="background: #c8e6c9;">📋</div>
+                    <div class="text">
+                        <h3>Upload Class</h3>
+                        <p>Import your class roster</p>
+                    </div>
+                </a>
+                <a href="my_profile.php" class="menu-item" style="background: #e1f5fe;">
+                    <div class="icon" style="background: #b3e5fc;">👤</div>
+                    <div class="text">
+                        <h3>My Profile</h3>
+                        <p>Update payment details</p>
+                    </div>
+                </a>
+                <?php if (!$is_super_admin): ?>
+                <a href="generate_access_code.php" class="menu-item" style="background: #fce4ec;">
+                    <div class="icon" style="background: #f8bbd9;">🔐</div>
+                    <div class="text">
+                        <h3>Access Code</h3>
+                        <p>Control super admin access</p>
+                    </div>
+                </a>
+                <?php endif; ?>
+                <?php if ($is_super_admin): ?>
+                <a href="manage_reps.php" class="menu-item" style="background: #fff3e0;">
+                    <div class="icon" style="background: #ffe0b2;">👥</div>
+                    <div class="text">
+                        <h3>Manage Reps</h3>
+                        <p>Create & manage rep accounts</p>
+                    </div>
+                </a>
+                <a href="view_rep_data.php" class="menu-item" style="background: #e3f2fd;">
+                    <div class="icon" style="background: #bbdefb;">👁️</div>
+                    <div class="text">
+                        <h3>View Rep Data</h3>
+                        <p>Access rep records with code</p>
+                    </div>
+                </a>
+                <?php endif; ?>
             </div>
         </div>
     </div>
 
-<?php endif; ?>
+<?php include 'footer.php'; ?>
 
 </body>
 </html>

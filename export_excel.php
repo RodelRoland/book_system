@@ -11,6 +11,18 @@ if (!isset($_SESSION['admin_logged_in'])) {
 // Capture the search term from the URL
 $search = isset($_GET['search']) ? $conn->real_escape_string($_GET['search']) : '';
 
+$semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
+
+$collection_filter = isset($_GET['collection_filter']) ? $_GET['collection_filter'] : 'all';
+if (!in_array($collection_filter, ['all', 'not_taken'], true)) {
+    $collection_filter = 'all';
+}
+
+$collection_where = '';
+if ($collection_filter === 'not_taken') {
+    $collection_where = " AND (ri.is_collected = 0 OR ri.is_collected IS NULL) ";
+}
+
 /* Tell browser this is a CSV file */
 header('Content-Type: text/csv');
 header('Content-Disposition: attachment; filename=filtered_book_requests.csv');
@@ -29,9 +41,13 @@ $sql = "SELECT
         JOIN students s ON r.student_id = s.student_id
         JOIN request_items ri ON r.request_id = ri.request_id
         JOIN books b ON ri.book_id = b.book_id
-        WHERE s.full_name LIKE '%$search%' 
+        WHERE r.semester_id = $semester_id
+          $collection_where
+          AND (
+               s.full_name LIKE '%$search%' 
            OR s.index_number LIKE '%$search%' 
            OR b.book_title LIKE '%$search%'
+          )
         ORDER BY r.created_at DESC";
 
 $result = $conn->query($sql);

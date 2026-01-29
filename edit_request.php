@@ -200,5 +200,7 @@ $all_books = $conn->query("SELECT * FROM books");
     </div>
 </div>
 
+<?php include 'footer.php'; ?>
+
 </body>
 </html>
