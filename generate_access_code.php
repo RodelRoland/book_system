@@ -42,8 +42,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['generate_code'])) {
     if ($duration_hours < 1) $duration_hours = 1;
     if ($duration_hours > 168) $duration_hours = 168; // Max 1 week
     
-    // Generate a random 8-character code
-    $new_code = strtoupper(substr(bin2hex(random_bytes(4)), 0, 8));
+    // Generate a random 4-digit code
+    $new_code = strval(random_int(1000, 9999));
     $expires_at = date('Y-m-d H:i:s', time() + ($duration_hours * 3600));
     
     $stmt = $conn->prepare("UPDATE admins SET access_code = ?, access_code_expires = ? WHERE admin_id = ?");

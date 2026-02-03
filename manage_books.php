@@ -8,6 +8,11 @@ if (!isset($_SESSION['admin_logged_in'])) {
     exit;
 }
 
+if (($_SESSION['admin_role'] ?? '') !== 'super_admin') {
+    header("Location: admin.php");
+    exit;
+}
+
 /* Add new book */
 if (isset($_POST['add_book'])) {
     $title = $conn->real_escape_string($_POST['book_title']);

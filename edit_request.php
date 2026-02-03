@@ -7,43 +7,90 @@ if (!isset($_SESSION['admin_logged_in'])) {
 include 'db.php';
 
 if (!isset($_GET['id'])) { die("Request ID missing."); }
-$request_id = $conn->real_escape_string($_GET['id']);
+
+$current_admin_id = intval($_SESSION['admin_id'] ?? 0);
+$current_admin_role = $_SESSION['admin_role'] ?? 'rep';
+$is_super_admin = ($current_admin_role === 'super_admin');
+
+$request_id = intval($_GET['id']);
+if ($request_id <= 0) {
+    header('Location: view_request.php?msg=invalid_request');
+    exit;
+}
 
 // 1. Get current request and student details
-$req_query = $conn->query("SELECT r.*, s.full_name FROM requests r JOIN students s ON r.student_id = s.student_id WHERE r.request_id = '$request_id'");
-$request = $req_query->fetch_assoc();
+if ($is_super_admin) {
+    $req_stmt = $conn->prepare("SELECT r.*, s.full_name FROM requests r JOIN students s ON r.student_id = s.student_id WHERE r.request_id = ? LIMIT 1");
+    $req_stmt->bind_param('i', $request_id);
+} else {
+    $req_stmt = $conn->prepare("SELECT r.*, s.full_name FROM requests r JOIN students s ON r.student_id = s.student_id WHERE r.request_id = ? AND r.admin_id = ? LIMIT 1");
+    $req_stmt->bind_param('ii', $request_id, $current_admin_id);
+}
+
+$req_stmt->execute();
+$req_query = $req_stmt->get_result();
+$request = ($req_query && $req_query->num_rows === 1) ? $req_query->fetch_assoc() : null;
+if (!$request) {
+    header('Location: view_request.php?msg=unauthorized');
+    exit;
+}
 
 // 2. Get currently selected book IDs for this request
 $current_books = [];
-$items_query = $conn->query("SELECT book_id FROM request_items WHERE request_id = '$request_id'");
-while($item = $items_query->fetch_assoc()){
-    $current_books[] = $item['book_id'];
+$items_stmt = $conn->prepare("SELECT book_id FROM request_items WHERE request_id = ?");
+$items_stmt->bind_param('i', $request_id);
+$items_stmt->execute();
+$items_query = $items_stmt->get_result();
+if ($items_query) {
+    while($item = $items_query->fetch_assoc()){
+        $current_books[] = $item['book_id'];
+    }
 }
 
 // 3. Handle the Update Logic
 if ($_SERVER["REQUEST_METHOD"] == "POST") {
     $selected_books = isset($_POST['books']) ? $_POST['books'] : [];
-    $amount_paid = $conn->real_escape_string($_POST['amount_paid']);
+    $amount_paid = floatval($_POST['amount_paid'] ?? 0);
     
     // Delete old items for this request
-    $conn->query("DELETE FROM request_items WHERE request_id = '$request_id'");
+    $del_stmt = $conn->prepare("DELETE FROM request_items WHERE request_id = ?");
+    $del_stmt->bind_param('i', $request_id);
+    $del_stmt->execute();
     
     $new_total = 0;
     foreach ($selected_books as $book_id) {
-        $book_id = $conn->real_escape_string($book_id);
+        $book_id = intval($book_id);
         // Get book price to calculate new total
-        $b_res = $conn->query("SELECT price FROM books WHERE book_id = '$book_id'");
-        $b_data = $b_res->fetch_assoc();
-        $new_total += $b_data['price'];
+        if ($book_id <= 0) {
+            continue;
+        }
+        $b_stmt = $conn->prepare("SELECT price FROM books WHERE book_id = ? LIMIT 1");
+        $b_stmt->bind_param('i', $book_id);
+        $b_stmt->execute();
+        $b_res = $b_stmt->get_result();
+        $b_data = ($b_res && $b_res->num_rows === 1) ? $b_res->fetch_assoc() : null;
+        if (!$b_data) {
+            continue;
+        }
+        $new_total += floatval($b_data['price']);
         
         // Insert back (marking as not collected by default, or you can preserve status)
-        $conn->query("INSERT INTO request_items (request_id, book_id, is_collected) VALUES ('$request_id', '$book_id', 0)");
+        $ins_stmt = $conn->prepare("INSERT INTO request_items (request_id, book_id, is_collected) VALUES (?, ?, 0)");
+        $ins_stmt->bind_param('ii', $request_id, $book_id);
+        $ins_stmt->execute();
     }
     
     $status = ($amount_paid >= $new_total) ? 'paid' : 'unpaid';
     
     // Update the main request table
-    $conn->query("UPDATE requests SET total_amount = '$new_total', amount_paid = '$amount_paid', payment_status = '$status' WHERE request_id = '$request_id'");
+    if ($is_super_admin) {
+        $upd_stmt = $conn->prepare("UPDATE requests SET total_amount = ?, amount_paid = ?, payment_status = ? WHERE request_id = ?");
+        $upd_stmt->bind_param('ddsi', $new_total, $amount_paid, $status, $request_id);
+    } else {
+        $upd_stmt = $conn->prepare("UPDATE requests SET total_amount = ?, amount_paid = ?, payment_status = ? WHERE request_id = ? AND admin_id = ?");
+        $upd_stmt->bind_param('ddsii', $new_total, $amount_paid, $status, $request_id, $current_admin_id);
+    }
+    $upd_stmt->execute();
     
     header("Location: view_request.php?msg=updated");
     exit();

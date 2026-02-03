@@ -8,6 +8,11 @@ if (!isset($_SESSION['admin_logged_in'])) {
     exit;
 }
 
+if (($_SESSION['admin_role'] ?? '') !== 'super_admin') {
+    header("Location: admin.php");
+    exit;
+}
+
 $message = "";
 
 /* Clear requests & request items */

@@ -60,9 +60,10 @@ $books = $conn->query("
                     type="text"
                     id="index_number"
                     name="index_number"
-                    minlength="10"
+                    minlength="3"
                     maxlength="10"
                     required
+                    placeholder="Enter full index or last 3 digits"
             >
 
             <label for="full_name">Full Name <span class="required">*</span></label>
@@ -232,49 +233,73 @@ $books = $conn->query("
 </script>
 
 <script>
-document.getElementById('index_number').addEventListener('blur', function() {
-    var indexNum = this.value;
+(function() {
+    var indexInput = document.getElementById('index_number');
     var nameInput = document.getElementById('full_name');
     var phoneInput = document.getElementById('phone');
     var creditInfo = document.getElementById('credit_info');
     var creditAmount = document.getElementById('credit_amount');
+    var lookupTimeout = null;
 
-    if (indexNum.length > 0) {
-        // Fetch student details including credit balance
-        fetch('get_student_credit.php?index=' + encodeURIComponent(indexNum))
-        .then(response => response.json())
-        .then(data => {
-            if (data.found) {
-                nameInput.value = data.full_name;
-                nameInput.style.color = "#2d3436";
-                if (data.phone) {
-                    phoneInput.value = data.phone;
-                }
-                
-                // Show credit balance if available
-                if (data.credit_balance > 0) {
-                    creditAmount.textContent = data.credit_balance.toFixed(2);
-                    creditInfo.style.display = 'block';
+    // Real-time lookup as user types (triggers after 3+ characters)
+    indexInput.addEventListener('input', function() {
+        var indexNum = this.value.trim();
+        
+        // Clear previous timeout
+        if (lookupTimeout) clearTimeout(lookupTimeout);
+        
+        // Need at least 3 characters to search
+        if (indexNum.length < 3) {
+            nameInput.value = '';
+            creditInfo.style.display = 'none';
+            return;
+        }
+        
+        // Debounce: wait 300ms after user stops typing
+        lookupTimeout = setTimeout(function() {
+            var repId = <?php echo $rep_id; ?>;
+            fetch('get_student_credit.php?index=' + encodeURIComponent(indexNum) + '&rep_id=' + repId)
+            .then(response => response.json())
+            .then(data => {
+                if (data.found) {
+                    nameInput.value = data.full_name;
+                    nameInput.style.color = "#2d3436";
+                    if (data.phone) {
+                        phoneInput.value = data.phone;
+                    }
+                    
+                    // Auto-fill full index number if partial match
+                    if (data.full_index && data.full_index !== indexNum) {
+                        indexInput.value = data.full_index;
+                        // Trigger book ownership check with full index
+                        checkOwnedBooks(data.full_index);
+                    }
+                    
+                    // Show credit balance if available
+                    if (data.credit_balance > 0) {
+                        creditAmount.textContent = data.credit_balance.toFixed(2);
+                        creditInfo.style.display = 'block';
+                    } else {
+                        creditInfo.style.display = 'none';
+                    }
                 } else {
+                    nameInput.value = '';
+                    nameInput.style.color = "#2d3436";
                     creditInfo.style.display = 'none';
                 }
-            } else {
-                nameInput.value = "";
-                nameInput.style.color = "#2d3436";
-                creditInfo.style.display = 'none';
-            }
-        })
-        .catch(error => {
-            console.error('Error:', error);
-        });
-    }
-});
+            })
+            .catch(error => {
+                console.error('Error:', error);
+            });
+        }, 300);
+    });
+})();
 </script>
     
 <script>
-document.querySelector('input[name="index_number"]').addEventListener('blur', function() {
-    const indexNumber = this.value;
-    if (indexNumber.length < 3) return; // Don't check empty or too short values
+// Function to check owned books (called after index is filled)
+function checkOwnedBooks(indexNumber) {
+    if (indexNumber.length < 3) return;
      
     fetch('check_student_books.php?index=' + indexNumber)
         .then(response => response.json())
@@ -292,13 +317,18 @@ document.querySelector('input[name="index_number"]').addEventListener('blur', fu
                 const checkbox = document.querySelector(`input[name="books[]"][value="${bookId}"]`);
                 if (checkbox) {
                     checkbox.disabled = true;
-                    checkbox.checked = false; // Uncheck it if they tried to select it before typing index
+                    checkbox.checked = false;
                     checkbox.parentElement.style.opacity = "0.5";
                     checkbox.parentElement.style.textDecoration = "line-through";
                     checkbox.parentElement.title = "You have already requested this book.";
                 }
             });
         });
+}
+
+// Also check on blur in case user typed full index directly
+document.querySelector('input[name="index_number"]').addEventListener('blur', function() {
+    checkOwnedBooks(this.value);
 });
 </script>
     

@@ -22,7 +22,7 @@ if (strlen($index_number) !== 10) {
 }
 
 // Check if student exists using prepared statement
-$stmt = $conn->prepare("SELECT student_id, credit_balance FROM students WHERE index_number = ?");
+$stmt = $conn->prepare("SELECT student_id, credit_balance, admin_id FROM students WHERE index_number = ?");
 $stmt->bind_param("s", $index_number);
 $stmt->execute();
 $check = $stmt->get_result();
@@ -34,10 +34,21 @@ if ($check->num_rows > 0) {
     $student = $check->fetch_assoc();
     $student_id = $student['student_id'];
     $credit_balance = floatval($student['credit_balance']);
+
+    $student_admin_id = intval($student['admin_id'] ?? 0);
+    if ($student_admin_id > 0 && $student_admin_id !== $rep_id) {
+        die("Student record is assigned to a different rep. Please contact the administrator.");
+    }
+
+    if ($student_admin_id <= 0) {
+        $claim = $conn->prepare("UPDATE students SET admin_id = ? WHERE student_id = ? AND (admin_id IS NULL OR admin_id = 0)");
+        $claim->bind_param("ii", $rep_id, $student_id);
+        $claim->execute();
+    }
 } else {
     // Insert new student using prepared statement
-    $stmt = $conn->prepare("INSERT INTO students (full_name, index_number, phone, credit_balance) VALUES (?, ?, ?, 0)");
-    $stmt->bind_param("sss", $full_name, $index_number, $phone);
+    $stmt = $conn->prepare("INSERT INTO students (full_name, index_number, phone, credit_balance, admin_id) VALUES (?, ?, ?, 0, ?)");
+    $stmt->bind_param("sssi", $full_name, $index_number, $phone, $rep_id);
     $stmt->execute();
     $student_id = $conn->insert_id;
 }
@@ -59,8 +70,8 @@ if ($credit_balance > 0) {
     }
     
     // Update student's credit balance
-    $stmt = $conn->prepare("UPDATE students SET credit_balance = ? WHERE student_id = ?");
-    $stmt->bind_param("di", $new_balance, $student_id);
+    $stmt = $conn->prepare("UPDATE students SET credit_balance = ? WHERE student_id = ? AND admin_id = ?");
+    $stmt->bind_param("dii", $new_balance, $student_id, $rep_id);
     $stmt->execute();
 } else {
     $amount_to_pay = $total_amount;

@@ -8,6 +8,10 @@ if (!isset($_SESSION['admin_logged_in'])) {
     exit;
 }
 
+$current_admin_id = intval($_SESSION['admin_id'] ?? 0);
+$current_admin_role = $_SESSION['admin_role'] ?? 'rep';
+$is_super_admin = ($current_admin_role === 'super_admin');
+
 // Capture the search term from the URL
 $search = isset($_GET['search']) ? $conn->real_escape_string($_GET['search']) : '';
 
@@ -42,6 +46,7 @@ $sql = "SELECT
         JOIN request_items ri ON r.request_id = ri.request_id
         JOIN books b ON ri.book_id = b.book_id
         WHERE r.semester_id = $semester_id
+          " . ($is_super_admin ? "" : " AND r.admin_id = $current_admin_id ") . "
           $collection_where
           AND (
                s.full_name LIKE '%$search%' 

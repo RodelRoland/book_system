@@ -7,94 +7,155 @@ if (!isset($_SESSION['admin_logged_in'])) {
     exit;
 }
 
+$admin_id = intval($_SESSION['admin_id'] ?? 0);
+$current_admin_role = $_SESSION['admin_role'] ?? 'rep';
+$is_super_admin = ($current_admin_role === 'super_admin');
+
 // Fetch available books
 $books_res = $conn->query("SELECT * FROM books WHERE availability = 'available'");
 
 $semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $full_name = $conn->real_escape_string($_POST['full_name']);
-    $index_number = $conn->real_escape_string($_POST['index_number']);
-    $phone = isset($_POST['phone']) ? $conn->real_escape_string($_POST['phone']) : '';
+    $full_name = trim($_POST['full_name'] ?? '');
+    $index_number = trim($_POST['index_number'] ?? '');
+    $phone = trim($_POST['phone'] ?? '');
     $selected_books = isset($_POST['books']) ? $_POST['books'] : [];
-    $cash_received = floatval($_POST['cash_received']);
+    $cash_received = floatval($_POST['cash_received'] ?? 0);
 
-    if (!empty($selected_books)) {
+    if ($index_number === '' || $full_name === '') {
+        $error = 'Index number and student name are required.';
+    } elseif (empty($selected_books)) {
+        $error = 'Please select at least one book.';
+    } else {
         $duplicate_titles = [];
         foreach ($selected_books as $book_id) {
             $book_id = intval($book_id);
-            $check_sql = "SELECT b.book_title 
-                          FROM request_items ri
-                          JOIN requests r ON ri.request_id = r.request_id
-                          JOIN students s ON r.student_id = s.student_id
-                          JOIN books b ON ri.book_id = b.book_id
-                          WHERE r.semester_id = $semester_id AND s.index_number = '$index_number' AND ri.book_id = '$book_id'";
-            
-            $check_res = $conn->query($check_sql);
-            if ($check_res && $check_res->num_rows > 0) {
-                $row = $check_res->fetch_assoc();
-                $duplicate_titles[] = $row['book_title'];
+            if ($book_id <= 0) {
+                continue;
+            }
+
+            if ($is_super_admin) {
+                $dup_stmt = $conn->prepare("SELECT b.book_title FROM request_items ri JOIN requests r ON ri.request_id = r.request_id JOIN students s ON r.student_id = s.student_id JOIN books b ON ri.book_id = b.book_id WHERE r.semester_id = ? AND s.index_number = ? AND ri.book_id = ? LIMIT 1");
+                $dup_stmt->bind_param('isi', $semester_id, $index_number, $book_id);
+            } else {
+                $dup_stmt = $conn->prepare("SELECT b.book_title FROM request_items ri JOIN requests r ON ri.request_id = r.request_id JOIN students s ON r.student_id = s.student_id JOIN books b ON ri.book_id = b.book_id WHERE r.semester_id = ? AND r.admin_id = ? AND s.index_number = ? AND ri.book_id = ? LIMIT 1");
+                $dup_stmt->bind_param('iisi', $semester_id, $admin_id, $index_number, $book_id);
+            }
+
+            if ($dup_stmt) {
+                $dup_stmt->execute();
+                $dup_res = $dup_stmt->get_result();
+                if ($dup_res && $dup_res->num_rows > 0) {
+                    $row = $dup_res->fetch_assoc();
+                    $duplicate_titles[] = $row['book_title'];
+                }
             }
         }
 
         if (!empty($duplicate_titles)) {
-            $error = "Duplicate Request: Student has already received: " . implode(", ", $duplicate_titles);
+            $error = 'Duplicate Request: Student has already received: ' . implode(', ', $duplicate_titles);
         } else {
-            // Save/Update student details
-            $conn->query("INSERT INTO students (index_number, full_name, phone, credit_balance) 
-                          VALUES ('$index_number', '$full_name', '$phone', 0) 
-                          ON DUPLICATE KEY UPDATE full_name='$full_name', phone='$phone'");
-            
-            $student_id_res = $conn->query("SELECT student_id, credit_balance FROM students WHERE index_number = '$index_number'");
-            $student_data = $student_id_res->fetch_assoc();
-            $student_id = $student_data['student_id'];
-            $existing_credit = floatval($student_data['credit_balance']);
+            $student_id = 0;
+            $existing_credit = 0;
 
-            $ids = implode(',', array_map('intval', $selected_books));
-            $price_res = $conn->query("SELECT SUM(price) as total FROM books WHERE book_id IN ($ids)");
-            $total_amount = floatval($price_res->fetch_assoc()['total']);
+            $sstmt = $conn->prepare("SELECT student_id, credit_balance, admin_id FROM students WHERE index_number = ? LIMIT 1");
+            $sstmt->bind_param('s', $index_number);
+            $sstmt->execute();
+            $sres = $sstmt->get_result();
 
-            // Calculate payment: existing credit + cash received
-            $total_payment = $existing_credit + $cash_received;
-            
-            if ($total_payment >= $total_amount) {
-                // Overpayment goes to credit balance
-                $new_credit = $total_payment - $total_amount;
-                $amount_paid = $total_amount;
+            if ($sres && $sres->num_rows === 1) {
+                $srow = $sres->fetch_assoc();
+                $student_id = intval($srow['student_id']);
+                $existing_credit = floatval($srow['credit_balance']);
+                $student_admin_id = intval($srow['admin_id'] ?? 0);
+
+                if (!$is_super_admin && $student_admin_id > 0 && $student_admin_id !== $admin_id) {
+                    $error = 'Student record is assigned to a different rep. Please contact the administrator.';
+                } else {
+                    if (!$is_super_admin && $student_admin_id <= 0) {
+                        $claim = $conn->prepare("UPDATE students SET admin_id = ? WHERE student_id = ? AND (admin_id IS NULL OR admin_id = 0)");
+                        $claim->bind_param('ii', $admin_id, $student_id);
+                        $claim->execute();
+                    }
+
+                    if ($is_super_admin) {
+                        $up = $conn->prepare("UPDATE students SET full_name = ?, phone = ? WHERE student_id = ?");
+                        $up->bind_param('ssi', $full_name, $phone, $student_id);
+                        $up->execute();
+                    } else {
+                        $up = $conn->prepare("UPDATE students SET full_name = ?, phone = ? WHERE student_id = ? AND admin_id = ?");
+                        $up->bind_param('ssii', $full_name, $phone, $student_id, $admin_id);
+                        $up->execute();
+                    }
+                }
             } else {
-                // Underpayment (shouldn't happen for manual orders, but handle it)
-                $new_credit = 0;
-                $amount_paid = $total_payment;
+                $ins = $conn->prepare("INSERT INTO students (index_number, full_name, phone, credit_balance, admin_id) VALUES (?, ?, ?, 0, ?)");
+                $ins->bind_param('sssi', $index_number, $full_name, $phone, $admin_id);
+                if ($ins->execute()) {
+                    $student_id = intval($conn->insert_id);
+                } else {
+                    $error = 'Database Error: ' . $conn->error;
+                }
             }
-            
-            // Update student's credit balance
-            $conn->query("UPDATE students SET credit_balance = $new_credit WHERE student_id = $student_id");
 
-            $semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
-            $admin_id = intval($_SESSION['admin_id'] ?? 0);
-            $sql_request = "INSERT INTO requests (student_id, total_amount, amount_paid, payment_status, created_at, semester_id, admin_id) 
-                            VALUES ('$student_id', '$total_amount', '$amount_paid', 'paid', NOW(), '$semester_id', '$admin_id')";
-            
-            if ($conn->query($sql_request)) {
-                $request_id = $conn->insert_id;
+            if (!isset($error) && $student_id > 0) {
+                $total_amount = 0;
                 foreach ($selected_books as $book_id) {
                     $book_id = intval($book_id);
-                    $conn->query("INSERT INTO request_items (request_id, book_id) VALUES ('$request_id', '$book_id')");
+                    if ($book_id <= 0) {
+                        continue;
+                    }
+                    $pstmt = $conn->prepare("SELECT price FROM books WHERE book_id = ? LIMIT 1");
+                    $pstmt->bind_param('i', $book_id);
+                    $pstmt->execute();
+                    $pres = $pstmt->get_result();
+                    if ($pres && $pres->num_rows === 1) {
+                        $total_amount += floatval($pres->fetch_assoc()['price']);
+                    }
                 }
-                
-                // Show success message with credit info if applicable
-                $msg = "manual_success";
-                if ($new_credit > 0) {
-                    $msg .= "&credit=" . $new_credit;
+
+                $total_payment = $existing_credit + $cash_received;
+                $amount_paid = $cash_received;
+                if ($total_payment >= $total_amount) {
+                    $new_credit = $total_payment - $total_amount;
+                } else {
+                    $new_credit = 0;
                 }
-                header("Location: view_request.php?msg=$msg");
-                exit;
-            } else {
-                $error = "Database Error: " . $conn->error;
+
+                if ($is_super_admin) {
+                    $conn->query("UPDATE students SET credit_balance = " . floatval($new_credit) . " WHERE student_id = " . intval($student_id));
+                } else {
+                    $conn->query("UPDATE students SET credit_balance = " . floatval($new_credit) . " WHERE student_id = " . intval($student_id) . " AND admin_id = " . intval($admin_id));
+                }
+
+                $semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
+                $req_stmt = $conn->prepare("INSERT INTO requests (student_id, total_amount, amount_paid, payment_status, created_at, semester_id, admin_id) VALUES (?, ?, ?, 'paid', NOW(), ?, ?)");
+                $req_stmt->bind_param('iddii', $student_id, $total_amount, $amount_paid, $semester_id, $admin_id);
+
+                if ($req_stmt->execute()) {
+                    $request_id = intval($conn->insert_id);
+                    $ri_stmt = $conn->prepare("INSERT INTO request_items (request_id, book_id) VALUES (?, ?)");
+                    foreach ($selected_books as $book_id) {
+                        $book_id = intval($book_id);
+                        if ($book_id <= 0) {
+                            continue;
+                        }
+                        $ri_stmt->bind_param('ii', $request_id, $book_id);
+                        $ri_stmt->execute();
+                    }
+
+                    $msg = 'manual_success';
+                    if ($new_credit > 0) {
+                        $msg .= '&credit=' . $new_credit;
+                    }
+                    header("Location: view_request.php?msg=$msg");
+                    exit;
+                } else {
+                    $error = 'Database Error: ' . $conn->error;
+                }
             }
         }
-    } else {
-        $error = "Please select at least one book.";
     }
 }
 ?>
@@ -332,12 +393,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 </div>
 
 <script>
-document.getElementById('index_number').addEventListener('blur', function() {
-    const index = this.value;
-    const nameInput = document.getElementById('full_name');
-    const phoneInput = document.getElementById('phone');
+const indexInput = document.getElementById('index_number');
+const nameInput = document.getElementById('full_name');
+const phoneInput = document.getElementById('phone');
+let lookupTimeout = null;
+
+// Real-time lookup as user types (triggers after 3+ characters)
+indexInput.addEventListener('input', function() {
+    const index = this.value.trim();
     
-    if (index.length > 2) {
+    // Clear previous timeout
+    if (lookupTimeout) clearTimeout(lookupTimeout);
+    
+    // Need at least 3 characters to search
+    if (index.length < 3) {
+        nameInput.value = '';
+        nameInput.classList.remove('valid');
+        nameInput.placeholder = 'Auto-filled from index';
+        return;
+    }
+    
+    // Debounce: wait 300ms after user stops typing
+    lookupTimeout = setTimeout(() => {
         // First, try class_students table (rep's uploaded roster)
         fetch('ajax_student_lookup.php?index=' + encodeURIComponent(index))
         .then(response => response.json())
@@ -346,6 +423,10 @@ document.getElementById('index_number').addEventListener('blur', function() {
                 nameInput.value = data.student_name;
                 nameInput.classList.add('valid');
                 nameInput.readOnly = false;
+                // Auto-fill full index number if partial match
+                if (data.full_index && data.full_index !== index) {
+                    indexInput.value = data.full_index;
+                }
             } else {
                 // Fall back to existing students table
                 return fetch('get_student_credit.php?index=' + encodeURIComponent(index))
@@ -355,6 +436,10 @@ document.getElementById('index_number').addEventListener('blur', function() {
                             nameInput.value = data2.full_name;
                             nameInput.classList.add('valid');
                             if (data2.phone) phoneInput.value = data2.phone;
+                            // Auto-fill full index number if partial match
+                            if (data2.full_index && data2.full_index !== index) {
+                                indexInput.value = data2.full_index;
+                            }
                         } else {
                             nameInput.value = '';
                             nameInput.classList.remove('valid');
@@ -364,12 +449,14 @@ document.getElementById('index_number').addEventListener('blur', function() {
                     });
             }
         });
-    }
+    }, 300);
 });
 
 const checkboxes = document.querySelectorAll('.book-checkbox');
 const displayTotal = document.getElementById('display_total');
 const cashInput = document.getElementById('cash_received');
+
+let userEditedCash = false;
 
 function calculateTotal() {
     let total = 0;
@@ -377,8 +464,16 @@ function calculateTotal() {
         if (cb.checked) total += parseFloat(cb.getAttribute('data-price'));
     });
     displayTotal.innerText = total.toFixed(2);
-    cashInput.value = total.toFixed(2);
+    // Only auto-fill cash if user hasn't manually edited it
+    if (!userEditedCash) {
+        cashInput.value = total.toFixed(2);
+    }
 }
+
+// Track when user manually edits the cash field
+cashInput.addEventListener('input', function() {
+    userEditedCash = true;
+});
 
 checkboxes.forEach(cb => cb.addEventListener('change', calculateTotal));
 </script>

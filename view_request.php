@@ -32,24 +32,19 @@ if (isset($_GET['return_balance'], $_GET['request_id'], $_GET['student_id'])) {
     $student_id = intval($_GET['student_id']);
 
     $req = $conn->query("SELECT total_amount, amount_paid FROM requests WHERE request_id = $request_id AND student_id = $student_id LIMIT 1");
-    $stu = $conn->query("SELECT credit_balance FROM students WHERE student_id = $student_id LIMIT 1");
 
-    if ($req && $stu && $req->num_rows === 1 && $stu->num_rows === 1) {
+    if ($req && $req->num_rows === 1) {
         $req_row = $req->fetch_assoc();
-        $stu_row = $stu->fetch_assoc();
 
         $overpaid = max(0, floatval($req_row['amount_paid']) - floatval($req_row['total_amount']));
-        $stored_credit = max(0, floatval($stu_row['credit_balance']));
-        $total_return = $overpaid + $stored_credit;
+
+        $total_return = $overpaid;
 
         if ($total_return > 0) {
             $conn->begin_transaction();
             try {
                 if ($overpaid > 0) {
                     $conn->query("UPDATE requests SET amount_paid = total_amount WHERE request_id = $request_id");
-                }
-                if ($stored_credit > 0) {
-                    $conn->query("UPDATE students SET credit_balance = 0 WHERE student_id = $student_id");
                 }
                 $amount_sql = number_format($total_return, 2, '.', '');
                 $conn->query("INSERT INTO balance_returns (student_id, request_id, amount, notes) VALUES ($student_id, $request_id, $amount_sql, 'Returned to student')");
@@ -86,7 +81,7 @@ if ($collection_filter === 'not_taken') {
 // 2. SQL Query
 $sql = "SELECT 
             r.request_id, r.student_id,
-            s.full_name, s.index_number, s.phone, s.credit_balance,
+            s.full_name, s.index_number, s.phone,
             r.total_amount, r.amount_paid, r.payment_status, r.created_at,
             COALESCE(br.refunded_amount, 0) AS refunded_amount,
             br.last_return_date,
@@ -351,7 +346,7 @@ $result = $conn->query($sql);
                         <th>Cost</th>
                         <th>Paid</th>
                         <th>Status</th>
-                        <th>Credit</th>
+                        <th>Balance</th>
                         <th>Actions</th>
                     </tr>
                 </thead>
@@ -359,9 +354,10 @@ $result = $conn->query($sql);
                 <?php if ($result && $result->num_rows > 0): ?>
                     <?php while($row = $result->fetch_assoc()): ?>
                     <?php
-                        $credit_balance = max(0, floatval($row['credit_balance']));
-                        $overpaid_amount = max(0, floatval($row['amount_paid']) - floatval($row['total_amount']));
-                        $debit_amount = max(0, floatval($row['total_amount']) - floatval($row['amount_paid']));
+                        $request_balance = floatval($row['amount_paid']) - floatval($row['total_amount']);
+                        $balance_amount = max(0, $request_balance);
+                        $debit_amount = max(0, -$request_balance);
+                        $overpaid_amount = $balance_amount;
                         $refunded_amount = max(0, floatval($row['refunded_amount'] ?? 0));
                     ?>
                     <tr>
@@ -405,23 +401,15 @@ $result = $conn->query($sql);
                                 <?php endif; ?>
                             <?php elseif ($debit_amount > 0): ?>
                                 <div class="debit-amt">Owes: GH₵ <?php echo number_format($debit_amount, 2); ?></div>
-                                <?php if ($credit_balance > 0): ?>
-                                    <div class="index" style="margin-top:4px; color:#28a745; font-weight:700;">Credit: GH₵ <?php echo number_format($credit_balance, 2); ?></div>
-                                <?php endif; ?>
-                            <?php elseif ($credit_balance > 0 || $overpaid_amount > 0): ?>
-                                <?php if ($credit_balance > 0): ?>
-                                    <div class="credit-amt">Credit: GH₵ <?php echo number_format($credit_balance, 2); ?></div>
-                                <?php endif; ?>
-                                <?php if ($overpaid_amount > 0): ?>
-                                    <div class="index" style="margin-top:4px; color:#667eea; font-weight:600;">Overpaid: GH₵ <?php echo number_format($overpaid_amount, 2); ?></div>
-                                <?php endif; ?>
+                            <?php elseif ($balance_amount > 0): ?>
+                                <div class="credit-amt">Balance: GH₵ <?php echo number_format($balance_amount, 2); ?></div>
                             <?php else: ?>
                                 <span class="zero-amt">—</span>
                             <?php endif; ?>
                         </td>
                         <td>
                             <a href="edit_request.php?id=<?php echo $row['request_id']; ?>" class="action-btn action-edit" title="Edit">✏️</a>
-                            <?php if ($refunded_amount <= 0 && ($credit_balance > 0 || $overpaid_amount > 0)): ?>
+                            <?php if ($refunded_amount <= 0 && $overpaid_amount > 0): ?>
                                 <a href="view_request.php?return_balance=1&request_id=<?php echo $row['request_id']; ?>&student_id=<?php echo $row['student_id']; ?>" 
                                    class="action-btn action-return" 
                                    onclick="return confirm('Mark this balance as returned to the student?');" 

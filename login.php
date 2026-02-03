@@ -20,7 +20,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
     
     try {
         // Authenticate against admins table
-        $stmt = $conn->prepare("SELECT admin_id, username, password_hash, full_name, class_name, role, is_active FROM admins WHERE username = ?");
+        $stmt = $conn->prepare("SELECT admin_id, username, password_hash, full_name, class_name, role, is_active, requires_password_reset FROM admins WHERE username = ?");
         if ($stmt) {
             $stmt->bind_param("s", $username);
             $stmt->execute();
@@ -32,6 +32,9 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
                 // Check if account is active
                 if (!$admin['is_active']) {
                     $error = "Your account has been deactivated. Contact the administrator.";
+                } elseif (intval($admin['requires_password_reset'] ?? 0) === 1 && ($admin['role'] ?? '') === 'rep') {
+                    header('Location: rep_first_time_reset.php');
+                    exit;
                 } elseif (password_verify($password, $admin['password_hash'])) {
                     $_SESSION['admin_logged_in'] = true;
                     $_SESSION['admin_id'] = $admin['admin_id'];
@@ -202,8 +205,14 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
             
             <button type="submit" class="login-btn">Sign In</button>
         </form>
-        
-        <div class="footer-text">Secure Admin Access</div>
+        <div class="footer-text" style="margin-top: 18px;">
+            <div style="margin-bottom: 6px;">Secure Admin Access</div>
+            <div>
+                <a href="rep_signup.php" style="color:#667eea; text-decoration:none; font-weight:600;">Rep Sign Up</a>
+                <span style="color:#ccc; padding: 0 8px;">|</span>
+                <a href="rep_first_time_reset.php" style="color:#667eea; text-decoration:none; font-weight:600;">First-Time Code Reset</a>
+            </div>
+        </div>
     </div>
 </div>
 

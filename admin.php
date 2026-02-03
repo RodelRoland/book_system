@@ -421,6 +421,13 @@ $is_super_admin = ($current_admin_role === 'super_admin');
                         <p>Create & manage rep accounts</p>
                     </div>
                 </a>
+                <a href="manage_rep_signups.php" class="menu-item" style="background: #e8f5e9;">
+                    <div class="icon" style="background: #c8e6c9;">✅</div>
+                    <div class="text">
+                        <h3>Rep Signup Payments</h3>
+                        <p>Confirm payment & approve reps</p>
+                    </div>
+                </a>
                 <a href="view_rep_data.php" class="menu-item" style="background: #e3f2fd;">
                     <div class="icon" style="background: #bbdefb;">👁️</div>
                     <div class="text">

@@ -70,8 +70,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_received'])) {
     $notes = $conn->real_escape_string($_POST['notes'] ?? '');
 
     if ($receive_id > 0 && $book_id > 0 && $copies_received != 0) {
-        $stmt = $conn->prepare("UPDATE books_received SET copies_received = ?, receive_date = ?, lecturer_name = ?, notes = ? WHERE receive_id = ? AND book_id = ?");
-        $stmt->bind_param("isssii", $copies_received, $receive_date, $lecturer_name, $notes, $receive_id, $book_id);
+        if ($is_super_admin) {
+            $stmt = $conn->prepare("UPDATE books_received SET copies_received = ?, receive_date = ?, lecturer_name = ?, notes = ? WHERE receive_id = ? AND book_id = ?");
+            $stmt->bind_param("isssii", $copies_received, $receive_date, $lecturer_name, $notes, $receive_id, $book_id);
+        } else {
+            $stmt = $conn->prepare("UPDATE books_received SET copies_received = ?, receive_date = ?, lecturer_name = ?, notes = ? WHERE receive_id = ? AND book_id = ? AND admin_id = ?");
+            $stmt->bind_param("isssiii", $copies_received, $receive_date, $lecturer_name, $notes, $receive_id, $book_id, $current_admin_id);
+        }
         if ($stmt->execute()) {
             $success_msg = "Received record updated successfully!";
         } else {
@@ -90,8 +95,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_received'])) {
     $book_id = intval($_POST['book_id']);
 
     if ($receive_id > 0 && $book_id > 0) {
-        $stmt = $conn->prepare("DELETE FROM books_received WHERE receive_id = ? AND book_id = ?");
-        $stmt->bind_param("ii", $receive_id, $book_id);
+        if ($is_super_admin) {
+            $stmt = $conn->prepare("DELETE FROM books_received WHERE receive_id = ? AND book_id = ?");
+            $stmt->bind_param("ii", $receive_id, $book_id);
+        } else {
+            $stmt = $conn->prepare("DELETE FROM books_received WHERE receive_id = ? AND book_id = ? AND admin_id = ?");
+            $stmt->bind_param("iii", $receive_id, $book_id, $current_admin_id);
+        }
         if ($stmt->execute()) {
             $success_msg = "Received record deleted successfully!";
         } else {
@@ -138,8 +148,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_payment'])) {
 
     $same_sign = ($copies_paid > 0 && $amount_paid > 0) || ($copies_paid < 0 && $amount_paid < 0);
     if ($payment_id > 0 && $book_id > 0 && $copies_paid != 0 && $amount_paid != 0 && $same_sign) {
-        $stmt = $conn->prepare("UPDATE lecturer_payments SET copies_paid = ?, amount_paid = ?, payment_date = ?, notes = ? WHERE payment_id = ? AND book_id = ?");
-        $stmt->bind_param("idssii", $copies_paid, $amount_paid, $payment_date, $notes, $payment_id, $book_id);
+        if ($is_super_admin) {
+            $stmt = $conn->prepare("UPDATE lecturer_payments SET copies_paid = ?, amount_paid = ?, payment_date = ?, notes = ? WHERE payment_id = ? AND book_id = ?");
+            $stmt->bind_param("idssii", $copies_paid, $amount_paid, $payment_date, $notes, $payment_id, $book_id);
+        } else {
+            $stmt = $conn->prepare("UPDATE lecturer_payments SET copies_paid = ?, amount_paid = ?, payment_date = ?, notes = ? WHERE payment_id = ? AND book_id = ? AND admin_id = ?");
+            $stmt->bind_param("idssiii", $copies_paid, $amount_paid, $payment_date, $notes, $payment_id, $book_id, $current_admin_id);
+        }
         if ($stmt->execute()) {
             $success_msg = "Payment record updated successfully!";
         } else {
@@ -158,8 +173,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_payment'])) {
     $book_id = intval($_POST['book_id']);
 
     if ($payment_id > 0 && $book_id > 0) {
-        $stmt = $conn->prepare("DELETE FROM lecturer_payments WHERE payment_id = ? AND book_id = ?");
-        $stmt->bind_param("ii", $payment_id, $book_id);
+        if ($is_super_admin) {
+            $stmt = $conn->prepare("DELETE FROM lecturer_payments WHERE payment_id = ? AND book_id = ?");
+            $stmt->bind_param("ii", $payment_id, $book_id);
+        } else {
+            $stmt = $conn->prepare("DELETE FROM lecturer_payments WHERE payment_id = ? AND book_id = ? AND admin_id = ?");
+            $stmt->bind_param("iii", $payment_id, $book_id, $current_admin_id);
+        }
         if ($stmt->execute()) {
             $success_msg = "Payment record deleted successfully!";
         } else {

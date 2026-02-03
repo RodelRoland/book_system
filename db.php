@@ -27,7 +27,7 @@ if (!$conn) {
 
 $conn->query("CREATE TABLE IF NOT EXISTS semesters (
     semester_id INT AUTO_INCREMENT PRIMARY KEY,
-    semester_name VARCHAR(100) NOT NULL,
+    semester_name VARCHAR(30) NOT NULL,
     is_active TINYINT(1) NOT NULL DEFAULT 0,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uq_semester_name (semester_name)
@@ -72,8 +72,8 @@ $conn->query("CREATE TABLE IF NOT EXISTS admins (
     admin_id INT AUTO_INCREMENT PRIMARY KEY,
     username VARCHAR(50) NOT NULL UNIQUE,
     password_hash VARCHAR(255) NOT NULL,
-    full_name VARCHAR(100) NOT NULL,
-    class_name VARCHAR(100) NULL,
+    full_name VARCHAR(30) NOT NULL,
+    class_name VARCHAR(30) NULL,
     role ENUM('super_admin', 'rep') NOT NULL DEFAULT 'rep',
     is_active TINYINT(1) NOT NULL DEFAULT 1,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -81,17 +81,42 @@ $conn->query("CREATE TABLE IF NOT EXISTS admins (
 
 // Ensure admins table has all required columns (for upgrades from older schema)
 ensure_column_exists($conn, 'admins', 'password_hash', 'VARCHAR(255) NOT NULL DEFAULT ""');
-ensure_column_exists($conn, 'admins', 'full_name', 'VARCHAR(100) NOT NULL DEFAULT ""');
-ensure_column_exists($conn, 'admins', 'class_name', 'VARCHAR(100) NULL');
+ensure_column_exists($conn, 'admins', 'full_name', 'VARCHAR(30) NOT NULL DEFAULT ""');
+ensure_column_exists($conn, 'admins', 'class_name', 'VARCHAR(30) NULL');
 ensure_column_exists($conn, 'admins', 'role', "ENUM('super_admin', 'rep') NOT NULL DEFAULT 'rep'");
 ensure_column_exists($conn, 'admins', 'is_active', 'TINYINT(1) NOT NULL DEFAULT 1');
-ensure_column_exists($conn, 'admins', 'access_code', 'VARCHAR(20) NULL');
+ensure_column_exists($conn, 'admins', 'access_code', 'VARCHAR(4) NULL');
 ensure_column_exists($conn, 'admins', 'access_code_expires', 'DATETIME NULL');
 ensure_column_exists($conn, 'admins', 'created_at', 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP');
-ensure_column_exists($conn, 'admins', 'momo_number', 'VARCHAR(20) NULL');
-ensure_column_exists($conn, 'admins', 'account_number', 'VARCHAR(50) NULL');
-ensure_column_exists($conn, 'admins', 'account_name', 'VARCHAR(100) NULL');
-ensure_column_exists($conn, 'admins', 'bank_name', 'VARCHAR(100) NULL');
+ensure_column_exists($conn, 'admins', 'momo_number', 'VARCHAR(10) NULL');
+ensure_column_exists($conn, 'admins', 'account_number', 'VARCHAR(20) NULL');
+ensure_column_exists($conn, 'admins', 'account_name', 'VARCHAR(30) NULL');
+ensure_column_exists($conn, 'admins', 'bank_name', 'VARCHAR(30) NULL');
+ensure_column_exists($conn, 'admins', 'first_time_code', 'VARCHAR(4) NULL');
+ensure_column_exists($conn, 'admins', 'first_time_code_expires', 'DATETIME NULL');
+ensure_column_exists($conn, 'admins', 'requires_password_reset', 'TINYINT(1) NOT NULL DEFAULT 0');
+ensure_column_exists($conn, 'admins', 'approved_at', 'DATETIME NULL');
+
+$conn->query("CREATE TABLE IF NOT EXISTS rep_signup_requests (
+    signup_id INT AUTO_INCREMENT PRIMARY KEY,
+    username VARCHAR(50) NOT NULL,
+    full_name VARCHAR(30) NOT NULL,
+    class_name VARCHAR(30) NULL,
+    momo_number VARCHAR(10) NULL,
+    bank_name VARCHAR(30) NULL,
+    account_name VARCHAR(30) NULL,
+    account_number VARCHAR(20) NULL,
+    status ENUM('pending','approved','rejected') NOT NULL DEFAULT 'pending',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    approved_at DATETIME NULL,
+    approved_by_admin_id INT NULL,
+    created_admin_id INT NULL,
+    UNIQUE KEY uq_rep_signup_username (username),
+    KEY idx_rep_signup_status (status),
+    KEY idx_rep_signup_created_at (created_at),
+    CONSTRAINT fk_rep_signup_approved_by FOREIGN KEY (approved_by_admin_id) REFERENCES admins(admin_id) ON DELETE SET NULL,
+    CONSTRAINT fk_rep_signup_created_admin FOREIGN KEY (created_admin_id) REFERENCES admins(admin_id) ON DELETE SET NULL
+)");
 
 // Create default super admin (Roland) if not exists - password: Rodel1234
 $check_admin = $conn->query("SELECT admin_id, password_hash FROM admins WHERE username = 'Roland'");
@@ -132,16 +157,30 @@ function get_active_semester_id(mysqli $conn): int {
         $id = intval($res->fetch_assoc()['semester_id']);
         $conn->query("UPDATE semesters SET is_active = 0");
         $stmt = $conn->prepare("UPDATE semesters SET is_active = 1 WHERE semester_id = ?");
-        $stmt->bind_param("i", $id);
-        $stmt->execute();
+        if ($stmt) {
+            $stmt->bind_param("i", $id);
+            $stmt->execute();
+        } else {
+            $conn->query("UPDATE semesters SET is_active = 1 WHERE semester_id = " . intval($id));
+        }
         return $id;
     }
 
     $name = 'Default Semester';
     $stmt = $conn->prepare("INSERT INTO semesters (semester_name, is_active) VALUES (?, 1)");
-    $stmt->bind_param("s", $name);
-    $stmt->execute();
-    return intval($conn->insert_id);
+    if ($stmt) {
+        $stmt->bind_param("s", $name);
+        $stmt->execute();
+        return intval($conn->insert_id);
+    }
+
+    $safe_name = $conn->real_escape_string($name);
+    $ok = $conn->query("INSERT INTO semesters (semester_name, is_active) VALUES ('{$safe_name}', 1)");
+    if ($ok) {
+        return intval($conn->insert_id);
+    }
+
+    die("Failed to create default semester. Database error: " . $conn->error);
 }
 
 $ACTIVE_SEMESTER_ID = get_active_semester_id($conn);
