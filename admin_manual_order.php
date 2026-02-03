@@ -116,10 +116,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
 
                 $total_payment = $existing_credit + $cash_received;
-                $amount_paid = $cash_received;
+                
+                // Calculate credit used and amount paid
                 if ($total_payment >= $total_amount) {
-                    $new_credit = $total_payment - $total_amount;
+                    // Fully paid - credit used is what was needed from credit
+                    $credit_used = max(0, $total_amount - $cash_received);
+                    if ($credit_used > $existing_credit) $credit_used = $existing_credit;
+                    $amount_paid = $total_amount; // Fully covered
+                    $new_credit = $total_payment - $total_amount; // Overpayment goes to credit
                 } else {
+                    // Partial payment - use all available credit + cash
+                    $credit_used = $existing_credit;
+                    $amount_paid = $total_payment; // Credit + cash
                     $new_credit = 0;
                 }
 
@@ -376,10 +384,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 <?php endif; ?>
             </div>
             
+            <div id="credit_info" style="display: none; background: #d4edda; border: 2px solid #28a745; padding: 15px; border-radius: 10px; margin-bottom: 20px;">
+                <strong style="color: #155724;"> Student has existing balance!</strong>
+                <div style="font-size: 24px; color: #28a745; font-weight: bold; margin-top: 5px;">
+                    GH₵ <span id="existing_credit">0.00</span>
+                </div>
+                <small style="color: #155724;">This will be automatically applied to the order.</small>
+            </div>
+            
             <div class="summary-card">
                 <div class="summary-row">
                     <span class="summary-label">Total Amount</span>
                     <span class="summary-value">GH₵ <span id="display_total">0.00</span></span>
+                </div>
+                <div id="balance_applied_row" class="summary-row" style="display: none; border-top: 1px solid rgba(255,255,255,0.3); padding-top: 10px;">
+                    <span class="summary-label">Balance Applied</span>
+                    <span style="font-size: 18px; font-weight: 600;">- GH₵ <span id="balance_applied">0.00</span></span>
+                </div>
+                <div id="amount_due_row" class="summary-row" style="display: none; border-top: 1px solid rgba(255,255,255,0.3); padding-top: 10px;">
+                    <span class="summary-label">Amount Due</span>
+                    <span style="font-size: 22px; font-weight: 700;">GH₵ <span id="amount_due">0.00</span></span>
                 </div>
                 <div class="cash-input-group">
                     <label>Cash Received</label>
@@ -387,7 +411,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 </div>
             </div>
             
-            <button type="submit" class="btn-submit">✓ Complete Transaction</button>
+            <button type="submit" class="btn-submit"> Complete Transaction</button>
         </form>
     </div>
 </div>
@@ -397,6 +421,25 @@ const indexInput = document.getElementById('index_number');
 const nameInput = document.getElementById('full_name');
 const phoneInput = document.getElementById('phone');
 let lookupTimeout = null;
+
+let studentCredit = 0;
+const creditInfo = document.getElementById('credit_info');
+const existingCreditEl = document.getElementById('existing_credit');
+const balanceAppliedRow = document.getElementById('balance_applied_row');
+const balanceAppliedEl = document.getElementById('balance_applied');
+const amountDueRow = document.getElementById('amount_due_row');
+const amountDueEl = document.getElementById('amount_due');
+
+function updateCreditDisplay(credit) {
+    studentCredit = credit;
+    if (credit > 0) {
+        existingCreditEl.textContent = credit.toFixed(2);
+        creditInfo.style.display = 'block';
+    } else {
+        creditInfo.style.display = 'none';
+    }
+    calculateTotal();
+}
 
 // Real-time lookup as user types (triggers after 3+ characters)
 indexInput.addEventListener('input', function() {
@@ -410,6 +453,7 @@ indexInput.addEventListener('input', function() {
         nameInput.value = '';
         nameInput.classList.remove('valid');
         nameInput.placeholder = 'Auto-filled from index';
+        updateCreditDisplay(0);
         return;
     }
     
@@ -427,6 +471,11 @@ indexInput.addEventListener('input', function() {
                 if (data.full_index && data.full_index !== index) {
                     indexInput.value = data.full_index;
                 }
+                // Check for credit in students table with full index
+                const fullIdx = data.full_index || index;
+                fetch('get_student_credit.php?index=' + encodeURIComponent(fullIdx))
+                    .then(r => r.json())
+                    .then(cd => updateCreditDisplay(cd.found ? cd.credit_balance : 0));
             } else {
                 // Fall back to existing students table
                 return fetch('get_student_credit.php?index=' + encodeURIComponent(index))
@@ -440,11 +489,13 @@ indexInput.addEventListener('input', function() {
                             if (data2.full_index && data2.full_index !== index) {
                                 indexInput.value = data2.full_index;
                             }
+                            updateCreditDisplay(data2.credit_balance || 0);
                         } else {
                             nameInput.value = '';
                             nameInput.classList.remove('valid');
                             nameInput.readOnly = false;
                             nameInput.placeholder = 'Enter student name manually';
+                            updateCreditDisplay(0);
                         }
                     });
             }
@@ -464,9 +515,28 @@ function calculateTotal() {
         if (cb.checked) total += parseFloat(cb.getAttribute('data-price'));
     });
     displayTotal.innerText = total.toFixed(2);
-    // Only auto-fill cash if user hasn't manually edited it
-    if (!userEditedCash) {
-        cashInput.value = total.toFixed(2);
+    
+    // Show balance application if student has credit
+    if (studentCredit > 0 && total > 0) {
+        const creditToApply = Math.min(studentCredit, total);
+        const amountDue = Math.max(0, total - studentCredit);
+        
+        balanceAppliedEl.textContent = creditToApply.toFixed(2);
+        amountDueEl.textContent = amountDue.toFixed(2);
+        balanceAppliedRow.style.display = 'flex';
+        amountDueRow.style.display = 'flex';
+        
+        // Only auto-fill cash if user hasn't manually edited it
+        if (!userEditedCash) {
+            cashInput.value = amountDue.toFixed(2);
+        }
+    } else {
+        balanceAppliedRow.style.display = 'none';
+        amountDueRow.style.display = 'none';
+        // Only auto-fill cash if user hasn't manually edited it
+        if (!userEditedCash) {
+            cashInput.value = total.toFixed(2);
+        }
     }
 }
 
