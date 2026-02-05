@@ -476,6 +476,8 @@ indexInput.addEventListener('input', function() {
                 fetch('get_student_credit.php?index=' + encodeURIComponent(fullIdx))
                     .then(r => r.json())
                     .then(cd => updateCreditDisplay(cd.found ? cd.credit_balance : 0));
+                // Check owned books
+                checkOwnedBooks(fullIdx);
             } else {
                 // Fall back to existing students table
                 return fetch('get_student_credit.php?index=' + encodeURIComponent(index))
@@ -490,6 +492,8 @@ indexInput.addEventListener('input', function() {
                                 indexInput.value = data2.full_index;
                             }
                             updateCreditDisplay(data2.credit_balance || 0);
+                            // Check owned books
+                            checkOwnedBooks(data2.full_index || index);
                         } else {
                             nameInput.value = '';
                             nameInput.classList.remove('valid');
@@ -543,9 +547,75 @@ function calculateTotal() {
 // Track when user manually edits the cash field
 cashInput.addEventListener('input', function() {
     userEditedCash = true;
+    
+    // Quick-fill feature: if cash equals total of all available books, auto-select all
+    const enteredAmount = parseFloat(this.value) || 0;
+    const allBooksTotal = getAllAvailableBooksTotal();
+    
+    if (enteredAmount > 0 && Math.abs(enteredAmount - allBooksTotal) < 0.01) {
+        // Select all enabled (non-owned) books
+        checkboxes.forEach(cb => {
+            if (!cb.disabled) {
+                cb.checked = true;
+            }
+        });
+        calculateTotal();
+    }
 });
 
+// Calculate total price of all available (enabled) books
+function getAllAvailableBooksTotal() {
+    let total = 0;
+    checkboxes.forEach(cb => {
+        if (!cb.disabled) {
+            total += parseFloat(cb.getAttribute('data-price')) || 0;
+        }
+    });
+    return total;
+}
+
 checkboxes.forEach(cb => cb.addEventListener('change', calculateTotal));
+
+// Function to check and disable already owned books
+function checkOwnedBooks(indexNumber) {
+    if (!indexNumber || indexNumber.length < 3) return;
+    
+    fetch('check_student_books.php?index=' + encodeURIComponent(indexNumber))
+        .then(response => response.json())
+        .then(ownedBooks => {
+            // Re-enable all first to reset
+            checkboxes.forEach(checkbox => {
+                checkbox.disabled = false;
+                checkbox.checked = false;
+                checkbox.parentElement.style.opacity = "1";
+                checkbox.parentElement.style.textDecoration = "";
+                checkbox.parentElement.title = "";
+                // Remove any existing "already owned" badge
+                const badge = checkbox.parentElement.querySelector('.owned-badge');
+                if (badge) badge.remove();
+            });
+            
+            // Disable books the student already owns
+            ownedBooks.forEach(bookId => {
+                const checkbox = document.querySelector(`.book-checkbox[value="${bookId}"]`);
+                if (checkbox) {
+                    checkbox.disabled = true;
+                    checkbox.checked = false;
+                    checkbox.parentElement.style.opacity = "0.5";
+                    checkbox.parentElement.style.textDecoration = "line-through";
+                    checkbox.parentElement.title = "Student already has this book";
+                    // Add "Already Owned" badge
+                    const badge = document.createElement('span');
+                    badge.className = 'owned-badge';
+                    badge.style.cssText = 'background:#dc3545;color:white;font-size:10px;padding:2px 6px;border-radius:4px;margin-left:8px;';
+                    badge.textContent = 'Already Owned';
+                    checkbox.parentElement.appendChild(badge);
+                }
+            });
+            
+            calculateTotal();
+        });
+}
 </script>
 
 <?php include 'footer.php'; ?>

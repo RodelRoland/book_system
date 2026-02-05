@@ -13,18 +13,105 @@ if (($_SESSION['admin_role'] ?? '') !== 'super_admin') {
     exit;
 }
 
+$semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
+$auto_assigned_count = 0;
+$auto_assigned_total = 0;
+
+/**
+ * Auto-assign a book to students who have sufficient credit balance.
+ * Creates a paid request and deducts from their balance.
+ */
+function auto_assign_book_to_students_with_balance($conn, $book_id, $book_price, $semester_id) {
+    $assigned_count = 0;
+    $total_deducted = 0;
+    
+    if ($book_price <= 0) {
+        return ['count' => 0, 'total' => 0];
+    }
+    
+    // Find students with credit_balance >= book_price
+    $stmt = $conn->prepare("SELECT student_id, full_name, credit_balance, admin_id FROM students WHERE credit_balance >= ?");
+    $stmt->bind_param("d", $book_price);
+    $stmt->execute();
+    $students = $stmt->get_result();
+    
+    while ($student = $students->fetch_assoc()) {
+        $student_id = intval($student['student_id']);
+        $current_balance = floatval($student['credit_balance']);
+        $admin_id = intval($student['admin_id']);
+        
+        // Check if student already has this book in current semester
+        $check_stmt = $conn->prepare("
+            SELECT ri.item_id FROM request_items ri 
+            JOIN requests r ON ri.request_id = r.request_id 
+            WHERE r.student_id = ? AND r.semester_id = ? AND ri.book_id = ? 
+            LIMIT 1
+        ");
+        $check_stmt->bind_param("iii", $student_id, $semester_id, $book_id);
+        $check_stmt->execute();
+        $existing = $check_stmt->get_result();
+        
+        if ($existing->num_rows > 0) {
+            // Student already has this book, skip
+            continue;
+        }
+        
+        // Create auto-assigned request (marked as paid)
+        $conn->begin_transaction();
+        try {
+            // Insert request
+            $req_stmt = $conn->prepare("
+                INSERT INTO requests (student_id, total_amount, amount_paid, payment_status, semester_id, admin_id, created_at) 
+                VALUES (?, ?, ?, 'paid', ?, ?, NOW())
+            ");
+            $req_stmt->bind_param("iddii", $student_id, $book_price, $book_price, $semester_id, $admin_id);
+            $req_stmt->execute();
+            $request_id = $conn->insert_id;
+            
+            // Insert request item
+            $item_stmt = $conn->prepare("INSERT INTO request_items (request_id, book_id, is_collected) VALUES (?, ?, 0)");
+            $item_stmt->bind_param("ii", $request_id, $book_id);
+            $item_stmt->execute();
+            
+            // Deduct from student's balance
+            $new_balance = $current_balance - $book_price;
+            $bal_stmt = $conn->prepare("UPDATE students SET credit_balance = ? WHERE student_id = ?");
+            $bal_stmt->bind_param("di", $new_balance, $student_id);
+            $bal_stmt->execute();
+            
+            $conn->commit();
+            $assigned_count++;
+            $total_deducted += $book_price;
+            
+        } catch (Exception $e) {
+            $conn->rollback();
+        }
+    }
+    
+    return ['count' => $assigned_count, 'total' => $total_deducted];
+}
+
 /* Add new book */
 if (isset($_POST['add_book'])) {
-    $title = $conn->real_escape_string($_POST['book_title']);
+    $title = trim($_POST['book_title']);
     $price = floatval($_POST['price']);
     $stock_quantity = intval($_POST['stock_quantity'] ?? 0);
-    $availability = ($stock_quantity > 0) ? 'available' : 'out_of_stock';
+    // Default to available - quantity is optional/for tracking only
+    $availability = 'available';
 
-    $conn->query("
-        INSERT INTO books (book_title, price, stock_quantity, availability)
-        VALUES ('$title', $price, $stock_quantity, '$availability')
-    ");
+    $stmt = $conn->prepare("INSERT INTO books (book_title, price, stock_quantity, availability) VALUES (?, ?, ?, ?)");
+    $stmt->bind_param("sdis", $title, $price, $stock_quantity, $availability);
+    $stmt->execute();
+    $new_book_id = $conn->insert_id;
+    
     if (function_exists('clear_books_cache')) clear_books_cache();
+    
+    // Auto-assign to students with sufficient balance if book is available
+    if ($availability === 'available' && $price > 0) {
+        $result = auto_assign_book_to_students_with_balance($conn, $new_book_id, $price, $semester_id);
+        $auto_assigned_count = $result['count'];
+        $auto_assigned_total = $result['total'];
+    }
 }
 
 /* Update book (price or availability) */
@@ -36,18 +123,30 @@ if (isset($_POST['update_book'])) {
         ? 'out_of_stock'
         : 'available';
 
-    if ($stock_quantity <= 0) {
-        $availability = 'out_of_stock';
-    }
+    // Stock quantity is optional - don't force out_of_stock based on quantity
+    // Only use the availability dropdown selection
 
-    $conn->query("
-        UPDATE books
-        SET price = $price,
-            stock_quantity = $stock_quantity,
-            availability = '$availability'
-        WHERE book_id = $book_id
-    ");
+    // Check if book was previously unavailable and is now being made available
+    $prev_stmt = $conn->prepare("SELECT availability, price FROM books WHERE book_id = ?");
+    $prev_stmt->bind_param("i", $book_id);
+    $prev_stmt->execute();
+    $prev_result = $prev_stmt->get_result();
+    $prev_book = $prev_result->fetch_assoc();
+    $was_unavailable = ($prev_book && $prev_book['availability'] === 'out_of_stock');
+    $price_changed = ($prev_book && floatval($prev_book['price']) != $price);
+    
+    $upd_stmt = $conn->prepare("UPDATE books SET price = ?, stock_quantity = ?, availability = ? WHERE book_id = ?");
+    $upd_stmt->bind_param("disi", $price, $stock_quantity, $availability, $book_id);
+    $upd_stmt->execute();
+    
     if (function_exists('clear_books_cache')) clear_books_cache();
+    
+    // Auto-assign if book is now available (was unavailable OR price changed)
+    if ($availability === 'available' && $price > 0 && ($was_unavailable || $price_changed)) {
+        $result = auto_assign_book_to_students_with_balance($conn, $book_id, $price, $semester_id);
+        $auto_assigned_count = $result['count'];
+        $auto_assigned_total = $result['total'];
+    }
 }
 
 /* Fetch all books */
@@ -279,6 +378,13 @@ $books = $conn->query("SELECT * FROM books ORDER BY book_title ASC");
     <div class="content-grid">
         <!-- Add New Book Form -->
         <div class="card">
+            <?php if ($auto_assigned_count > 0): ?>
+            <div style="background: #d4edda; color: #155724; padding: 15px; border-radius: 10px; margin-bottom: 20px; border-left: 4px solid #28a745;">
+                <strong>✅ Auto-Assignment Complete!</strong><br>
+                <span style="font-size: 14px;">Automatically assigned book to <strong><?php echo $auto_assigned_count; ?></strong> student(s) with existing balance.</span><br>
+                <span style="font-size: 13px; opacity: 0.8;">Total deducted: GH₵ <?php echo number_format($auto_assigned_total, 2); ?></span>
+            </div>
+            <?php endif; ?>
             <h2><span class="icon">➕</span> Add New Book</h2>
             <form method="post">
                 <div class="form-group">
@@ -290,8 +396,8 @@ $books = $conn->query("SELECT * FROM books ORDER BY book_title ASC");
                     <input type="number" step="0.01" name="price" placeholder="0.00" required>
                 </div>
                 <div class="form-group">
-                    <label>Stock Quantity</label>
-                    <input type="number" name="stock_quantity" min="0" placeholder="0" required>
+                    <label>Stock Quantity <span style="font-weight:normal;color:#888;">(optional)</span></label>
+                    <input type="number" name="stock_quantity" min="0" placeholder="0">
                 </div>
                 <button type="submit" name="add_book" class="btn-primary">Add Book</button>
             </form>

@@ -275,9 +275,10 @@ if (empty($books_array)) {
                     // Auto-fill full index number if partial match
                     if (data.full_index && data.full_index !== indexNum) {
                         indexInput.value = data.full_index;
-                        // Trigger book ownership check with full index
-                        checkOwnedBooks(data.full_index);
                     }
+                    
+                    // Always check owned books when student is found
+                    checkOwnedBooks(data.full_index || indexNum);
                     
                     // Show credit balance if available
                     if (data.credit_balance > 0) {

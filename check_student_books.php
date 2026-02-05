@@ -1,24 +1,32 @@
 <?php
 include 'db.php';
 
+header('Content-Type: application/json');
+
+$semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
+
 if (isset($_GET['index'])) {
-    $index = $conn->real_escape_string($_GET['index']);
+    $index = trim($_GET['index']);
     
-    // Find all Book IDs already linked to this Index Number
-    $sql = "SELECT ri.book_id 
-            FROM request_items ri
-            JOIN requests r ON ri.request_id = r.request_id
-            JOIN students s ON r.student_id = s.student_id
-            WHERE s.index_number = '$index'";
-            
-    $result = $conn->query($sql);
+    // Find all Book IDs already requested by this student in the current semester
+    $stmt = $conn->prepare("
+        SELECT ri.book_id 
+        FROM request_items ri
+        JOIN requests r ON ri.request_id = r.request_id
+        JOIN students s ON r.student_id = s.student_id
+        WHERE s.index_number = ? AND r.semester_id = ?
+    ");
+    $stmt->bind_param("si", $index, $semester_id);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    
     $owned_books = [];
-    
     while ($row = $result->fetch_assoc()) {
-        $owned_books[] = $row['book_id'];
+        $owned_books[] = intval($row['book_id']);
     }
     
-    // Send the list back to the browser as JSON
     echo json_encode($owned_books);
+} else {
+    echo json_encode([]);
 }
 ?>

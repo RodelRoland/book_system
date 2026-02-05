@@ -237,24 +237,39 @@ if ($selected_book_id > 0) {
 }
 
 if ($selected_book_id > 0) {
-    $stmt = $conn->prepare("SELECT COUNT(DISTINCT r.student_id) AS c FROM request_items ri JOIN requests r ON ri.request_id = r.request_id WHERE ri.book_id = ? AND r.semester_id = ?");
-    $stmt->bind_param("ii", $selected_book_id, $semester_id);
+    if ($is_super_admin) {
+        $stmt = $conn->prepare("SELECT COUNT(DISTINCT r.student_id) AS c FROM request_items ri JOIN requests r ON ri.request_id = r.request_id WHERE ri.book_id = ? AND r.semester_id = ?");
+        $stmt->bind_param("ii", $selected_book_id, $semester_id);
+    } else {
+        $stmt = $conn->prepare("SELECT COUNT(DISTINCT r.student_id) AS c FROM request_items ri JOIN requests r ON ri.request_id = r.request_id WHERE ri.book_id = ? AND r.semester_id = ? AND r.admin_id = ?");
+        $stmt->bind_param("iii", $selected_book_id, $semester_id, $current_admin_id);
+    }
     $stmt->execute();
     $res = $stmt->get_result();
     if ($res && $res->num_rows === 1) {
         $selected_total_students = intval($res->fetch_assoc()['c']);
     }
 
-    $stmt = $conn->prepare("SELECT COUNT(DISTINCT r.student_id) AS c FROM request_items ri JOIN requests r ON ri.request_id = r.request_id WHERE ri.book_id = ? AND ri.is_collected = 1 AND r.semester_id = ?");
-    $stmt->bind_param("ii", $selected_book_id, $semester_id);
+    if ($is_super_admin) {
+        $stmt = $conn->prepare("SELECT COUNT(DISTINCT r.student_id) AS c FROM request_items ri JOIN requests r ON ri.request_id = r.request_id WHERE ri.book_id = ? AND ri.is_collected = 1 AND r.semester_id = ?");
+        $stmt->bind_param("ii", $selected_book_id, $semester_id);
+    } else {
+        $stmt = $conn->prepare("SELECT COUNT(DISTINCT r.student_id) AS c FROM request_items ri JOIN requests r ON ri.request_id = r.request_id WHERE ri.book_id = ? AND ri.is_collected = 1 AND r.semester_id = ? AND r.admin_id = ?");
+        $stmt->bind_param("iii", $selected_book_id, $semester_id, $current_admin_id);
+    }
     $stmt->execute();
     $res = $stmt->get_result();
     if ($res && $res->num_rows === 1) {
         $selected_received_students = intval($res->fetch_assoc()['c']);
     }
 
-    $stmt = $conn->prepare("SELECT COUNT(DISTINCT r.student_id) AS c FROM request_items ri JOIN requests r ON ri.request_id = r.request_id WHERE ri.book_id = ? AND ri.is_collected = 0 AND r.semester_id = ?");
-    $stmt->bind_param("ii", $selected_book_id, $semester_id);
+    if ($is_super_admin) {
+        $stmt = $conn->prepare("SELECT COUNT(DISTINCT r.student_id) AS c FROM request_items ri JOIN requests r ON ri.request_id = r.request_id WHERE ri.book_id = ? AND ri.is_collected = 0 AND r.semester_id = ?");
+        $stmt->bind_param("ii", $selected_book_id, $semester_id);
+    } else {
+        $stmt = $conn->prepare("SELECT COUNT(DISTINCT r.student_id) AS c FROM request_items ri JOIN requests r ON ri.request_id = r.request_id WHERE ri.book_id = ? AND ri.is_collected = 0 AND r.semester_id = ? AND r.admin_id = ?");
+        $stmt->bind_param("iii", $selected_book_id, $semester_id, $current_admin_id);
+    }
     $stmt->execute();
     $res = $stmt->get_result();
     if ($res && $res->num_rows === 1) {
@@ -264,6 +279,12 @@ if ($selected_book_id > 0) {
 
 $selected_received_result = null;
 $selected_payments_result = null;
+$students_received = null;
+$students_yet_to_receive = null;
+$show_received_list = isset($_GET['show_received']) && $_GET['show_received'] === '1';
+$show_yet_list = isset($_GET['show_yet']) && $_GET['show_yet'] === '1';
+$export_received = isset($_GET['export_received']) && $_GET['export_received'] === '1';
+
 if ($selected_book_id > 0) {
     $admin_cond = $is_super_admin ? "" : " AND admin_id = $current_admin_id";
     $stmt = $conn->prepare("SELECT * FROM books_received WHERE book_id = ? AND semester_id = ? $admin_cond ORDER BY receive_date DESC, created_at DESC LIMIT 50");
@@ -275,6 +296,79 @@ if ($selected_book_id > 0) {
     $stmt->bind_param("ii", $selected_book_id, $semester_id);
     $stmt->execute();
     $selected_payments_result = $stmt->get_result();
+
+    if ($show_received_list || $export_received) {
+        if ($is_super_admin) {
+            $stmt = $conn->prepare("
+            SELECT DISTINCT s.student_id, s.full_name, s.index_number, s.phone, r.created_at as request_date
+            FROM request_items ri
+            JOIN requests r ON ri.request_id = r.request_id
+            JOIN students s ON r.student_id = s.student_id
+            WHERE ri.book_id = ? AND ri.is_collected = 1 AND r.semester_id = ?
+            ORDER BY s.full_name ASC
+        ");
+            $stmt->bind_param("ii", $selected_book_id, $semester_id);
+        } else {
+            $stmt = $conn->prepare("
+            SELECT DISTINCT s.student_id, s.full_name, s.index_number, s.phone, r.created_at as request_date
+            FROM request_items ri
+            JOIN requests r ON ri.request_id = r.request_id
+            JOIN students s ON r.student_id = s.student_id
+            WHERE ri.book_id = ? AND ri.is_collected = 1 AND r.semester_id = ? AND r.admin_id = ?
+            ORDER BY s.full_name ASC
+        ");
+            $stmt->bind_param("iii", $selected_book_id, $semester_id, $current_admin_id);
+        }
+        $stmt->execute();
+        $students_received = $stmt->get_result();
+    }
+    
+    // Fetch students who haven't received this book yet
+    if ($show_yet_list) {
+        if ($is_super_admin) {
+            $stmt = $conn->prepare("
+            SELECT DISTINCT s.student_id, s.full_name, s.index_number, s.phone, r.created_at as request_date
+            FROM request_items ri 
+            JOIN requests r ON ri.request_id = r.request_id 
+            JOIN students s ON r.student_id = s.student_id
+            WHERE ri.book_id = ? AND ri.is_collected = 0 AND r.semester_id = ?
+            ORDER BY s.full_name ASC
+        ");
+            $stmt->bind_param("ii", $selected_book_id, $semester_id);
+        } else {
+            $stmt = $conn->prepare("
+            SELECT DISTINCT s.student_id, s.full_name, s.index_number, s.phone, r.created_at as request_date
+            FROM request_items ri 
+            JOIN requests r ON ri.request_id = r.request_id 
+            JOIN students s ON r.student_id = s.student_id
+            WHERE ri.book_id = ? AND ri.is_collected = 0 AND r.semester_id = ? AND r.admin_id = ?
+            ORDER BY s.full_name ASC
+        ");
+            $stmt->bind_param("iii", $selected_book_id, $semester_id, $current_admin_id);
+        }
+        $stmt->execute();
+        $students_yet_to_receive = $stmt->get_result();
+    }
+}
+
+if ($export_received && $selected_book_id > 0) {
+    header('Content-Type: text/csv');
+    $safe_title = preg_replace('/[^a-zA-Z0-9_-]+/', '_', $selected_book_title ?: ('book_' . $selected_book_id));
+    header('Content-Disposition: attachment; filename=students_received_' . $safe_title . '.csv');
+    $output = fopen('php://output', 'w');
+    fputcsv($output, ['Student Name', 'Index Number', 'Phone', 'Request Date']);
+    if ($students_received) {
+        while ($row = $students_received->fetch_assoc()) {
+            fputcsv($output, [
+                $row['full_name'],
+                $row['index_number'],
+                $row['phone'],
+                $row['request_date'],
+            ]);
+        }
+    }
+    fclose($output);
+    exit;
 }
 
 // Fetch recent books received
@@ -546,15 +640,98 @@ $filter_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY boo
                     <?php echo htmlspecialchars($selected_book_title); ?>
                 </div>
             </div>
-            <div class="stat-card green">
-                <div class="label">Students Received</div>
-                <div class="value"><?php echo number_format($selected_received_students); ?></div>
+            <a href="?book_id=<?php echo $selected_book_id; ?>&show_received=1" style="text-decoration: none;">
+                <div class="stat-card green" style="cursor: pointer; transition: transform 0.2s, box-shadow 0.2s; <?php echo $show_received_list ? 'box-shadow: 0 0 0 3px #28a745;' : ''; ?>">
+                    <div class="label">Students Received <span style="font-size:10px;">(Click to view)</span></div>
+                    <div class="value"><?php echo number_format($selected_received_students); ?></div>
+                </div>
+            </a>
+            <a href="?book_id=<?php echo $selected_book_id; ?>&show_yet=1" style="text-decoration: none;">
+                <div class="stat-card red" style="cursor: pointer; transition: transform 0.2s, box-shadow 0.2s; <?php echo $show_yet_list ? 'box-shadow: 0 0 0 3px #dc3545;' : ''; ?>">
+                    <div class="label">Students Yet to Receive <span style="font-size:10px;">(Click to view)</span></div>
+                    <div class="value"><?php echo number_format($selected_yet_students); ?></div>
+                </div>
+            </a>
+        </div>
+
+        <?php if ($show_received_list && $students_received && $students_received->num_rows > 0): ?>
+        <div class="card" style="margin-bottom: 25px; border-left: 4px solid #28a745;">
+            <h3 style="color: #28a745;">📋 Students Received "<?php echo htmlspecialchars($selected_book_title); ?>" (<?php echo $students_received->num_rows; ?>)</h3>
+            <div style="display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap;">
+                <a href="?book_id=<?php echo $selected_book_id; ?>" class="btn-primary" style="width: auto; padding: 8px 16px; font-size: 13px; text-decoration: none; display: inline-block; background: #6c757d;">Hide List</a>
+                <a href="?book_id=<?php echo $selected_book_id; ?>&export_received=1" class="btn-primary" style="width: auto; padding: 8px 16px; font-size: 13px; text-decoration: none; display: inline-block;">Export (Excel)</a>
             </div>
-            <div class="stat-card red">
-                <div class="label">Students Yet to Receive</div>
-                <div class="value"><?php echo number_format($selected_yet_students); ?></div>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>Student Name</th>
+                            <th>Index Number</th>
+                            <th>Phone</th>
+                            <th>Request Date</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php $counter = 1; while ($student = $students_received->fetch_assoc()): ?>
+                        <tr>
+                            <td><?php echo $counter++; ?></td>
+                            <td><strong><?php echo htmlspecialchars($student['full_name']); ?></strong></td>
+                            <td><?php echo htmlspecialchars($student['index_number']); ?></td>
+                            <td><?php echo htmlspecialchars($student['phone'] ?: '-'); ?></td>
+                            <td><?php echo date('M d, Y', strtotime($student['request_date'])); ?></td>
+                        </tr>
+                        <?php endwhile; ?>
+                    </tbody>
+                </table>
             </div>
         </div>
+        <?php elseif ($show_received_list): ?>
+        <div class="card" style="margin-bottom: 25px; border-left: 4px solid #28a745;">
+            <h3 style="color: #28a745;">ℹ️ No students marked as received for "<?php echo htmlspecialchars($selected_book_title); ?>"</h3>
+            <p style="color: #666;">No collected records found for this book.</p>
+            <a href="?book_id=<?php echo $selected_book_id; ?>" style="color: #667eea; font-weight: 600;">← Back</a>
+        </div>
+        <?php endif; ?>
+        
+        <?php if ($show_yet_list && $students_yet_to_receive && $students_yet_to_receive->num_rows > 0): ?>
+        <div class="card" style="margin-bottom: 25px; border-left: 4px solid #dc3545;">
+            <h3 style="color: #dc3545;">📋 Students Yet to Receive "<?php echo htmlspecialchars($selected_book_title); ?>" (<?php echo $students_yet_to_receive->num_rows; ?>)</h3>
+            <div style="display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap;">
+                <a href="?book_id=<?php echo $selected_book_id; ?>" class="btn-primary" style="width: auto; padding: 8px 16px; font-size: 13px; text-decoration: none; display: inline-block;">Hide List</a>
+            </div>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>Student Name</th>
+                            <th>Index Number</th>
+                            <th>Phone</th>
+                            <th>Request Date</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php $counter = 1; while ($student = $students_yet_to_receive->fetch_assoc()): ?>
+                        <tr>
+                            <td><?php echo $counter++; ?></td>
+                            <td><strong><?php echo htmlspecialchars($student['full_name']); ?></strong></td>
+                            <td><?php echo htmlspecialchars($student['index_number']); ?></td>
+                            <td><?php echo htmlspecialchars($student['phone'] ?: '-'); ?></td>
+                            <td><?php echo date('M d, Y', strtotime($student['request_date'])); ?></td>
+                        </tr>
+                        <?php endwhile; ?>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <?php elseif ($show_yet_list): ?>
+        <div class="card" style="margin-bottom: 25px; border-left: 4px solid #28a745;">
+            <h3 style="color: #28a745;">✅ All students have received "<?php echo htmlspecialchars($selected_book_title); ?>"</h3>
+            <p style="color: #666;">No pending collections for this book.</p>
+            <a href="?book_id=<?php echo $selected_book_id; ?>" style="color: #667eea; font-weight: 600;">← Back</a>
+        </div>
+        <?php endif; ?>
     <?php endif; ?>
 
     <?php if ($selected_book_id > 0): ?>
