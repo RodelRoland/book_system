@@ -4,13 +4,17 @@ include 'db.php';
 header('Content-Type: application/json');
 
 if (isset($_GET['index'])) {
-    $index = $conn->real_escape_string($_GET['index']);
+    $index = trim($_GET['index']);
     $rep_id = isset($_GET['rep_id']) ? intval($_GET['rep_id']) : 0;
     
-    // Support partial matching (last 3+ digits)
+    // Support partial matching (last 3+ digits) using prepared statements
+    $like_pattern = '%' . $index;
+    
     // First check students table (existing students with order history)
-    $sql = "SELECT index_number, full_name, phone, credit_balance FROM students WHERE index_number LIKE '%$index' LIMIT 1";
-    $result = $conn->query($sql);
+    $stmt = $conn->prepare("SELECT index_number, full_name, phone, credit_balance FROM students WHERE index_number LIKE ? LIMIT 1");
+    $stmt->bind_param("s", $like_pattern);
+    $stmt->execute();
+    $result = $stmt->get_result();
 
     if ($result && $result->num_rows > 0) {
         $row = $result->fetch_assoc();
@@ -24,11 +28,14 @@ if (isset($_GET['index'])) {
     } else {
         // Fallback: check class_students table (rep's uploaded roster)
         if ($rep_id > 0) {
-            $sql2 = "SELECT index_number, student_name FROM class_students WHERE admin_id = $rep_id AND index_number LIKE '%$index' LIMIT 1";
+            $stmt2 = $conn->prepare("SELECT index_number, student_name FROM class_students WHERE admin_id = ? AND index_number LIKE ? LIMIT 1");
+            $stmt2->bind_param("is", $rep_id, $like_pattern);
         } else {
-            $sql2 = "SELECT index_number, student_name FROM class_students WHERE index_number LIKE '%$index' LIMIT 1";
+            $stmt2 = $conn->prepare("SELECT index_number, student_name FROM class_students WHERE index_number LIKE ? LIMIT 1");
+            $stmt2->bind_param("s", $like_pattern);
         }
-        $result2 = $conn->query($sql2);
+        $stmt2->execute();
+        $result2 = $stmt2->get_result();
         
         if ($result2 && $result2->num_rows > 0) {
             $row2 = $result2->fetch_assoc();

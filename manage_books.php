@@ -24,6 +24,7 @@ if (isset($_POST['add_book'])) {
         INSERT INTO books (book_title, price, stock_quantity, availability)
         VALUES ('$title', $price, $stock_quantity, '$availability')
     ");
+    if (function_exists('clear_books_cache')) clear_books_cache();
 }
 
 /* Update book (price or availability) */
@@ -46,6 +47,7 @@ if (isset($_POST['update_book'])) {
             availability = '$availability'
         WHERE book_id = $book_id
     ");
+    if (function_exists('clear_books_cache')) clear_books_cache();
 }
 
 /* Fetch all books */

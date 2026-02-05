@@ -228,7 +228,9 @@ $all_books = $conn->query("SELECT * FROM books");
             <div class="books-list">
                 <?php while($book = $all_books->fetch_assoc()): ?>
                     <label class="book-item">
-                        <input type="checkbox" name="books[]" value="<?php echo $book['book_id']; ?>" 
+                        <input type="checkbox" name="books[]" class="book-checkbox" 
+                               value="<?php echo $book['book_id']; ?>" 
+                               data-price="<?php echo $book['price']; ?>"
                             <?php echo in_array($book['book_id'], $current_books) ? 'checked' : ''; ?>>
                         <span class="title"><?php echo htmlspecialchars($book['book_title']); ?></span>
                         <span class="price">GH₵ <?php echo number_format($book['price'], 2); ?></span>
@@ -236,9 +238,14 @@ $all_books = $conn->query("SELECT * FROM books");
                 <?php endwhile; ?>
             </div>
 
+            <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px; border-radius: 10px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center;">
+                <span style="font-size: 14px; opacity: 0.9;">Total Amount</span>
+                <span style="font-size: 24px; font-weight: 700;">GH₵ <span id="display_total"><?php echo number_format($request['total_amount'], 2); ?></span></span>
+            </div>
+
             <div class="form-group">
                 <label>Amount Paid (GH₵)</label>
-                <input type="number" step="0.01" name="amount_paid" class="form-input" value="<?php echo $request['amount_paid']; ?>">
+                <input type="number" step="0.01" name="amount_paid" id="amount_paid" class="form-input" value="<?php echo $request['amount_paid']; ?>">
             </div>
 
             <button type="submit" class="btn-save">Update Request</button>
@@ -246,6 +253,25 @@ $all_books = $conn->query("SELECT * FROM books");
         </form>
     </div>
 </div>
+
+<script>
+const checkboxes = document.querySelectorAll('.book-checkbox');
+const displayTotal = document.getElementById('display_total');
+const amountPaid = document.getElementById('amount_paid');
+
+function calculateTotal() {
+    let total = 0;
+    checkboxes.forEach(cb => {
+        if (cb.checked) total += parseFloat(cb.getAttribute('data-price'));
+    });
+    displayTotal.innerText = total.toFixed(2);
+}
+
+checkboxes.forEach(cb => cb.addEventListener('change', calculateTotal));
+
+// Calculate on page load
+calculateTotal();
+</script>
 
 <?php include 'footer.php'; ?>
 

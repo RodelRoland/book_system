@@ -35,13 +35,25 @@ if (isset($_GET['request_id'])) {
         // 2. Flip the status
         $new_status = ($row['payment_status'] == 'paid') ? 'unpaid' : 'paid';
         
-        // 3. Update the database
-        if ($is_super_admin) {
-            $upd = $conn->prepare("UPDATE requests SET payment_status = ? WHERE request_id = ?");
-            $upd->bind_param('si', $new_status, $request_id);
+        // 3. Update the database - also update amount_paid when marking as paid
+        if ($new_status === 'paid') {
+            // When marking as paid, set amount_paid = total_amount so balance shows correctly
+            if ($is_super_admin) {
+                $upd = $conn->prepare("UPDATE requests SET payment_status = ?, amount_paid = total_amount WHERE request_id = ?");
+                $upd->bind_param('si', $new_status, $request_id);
+            } else {
+                $upd = $conn->prepare("UPDATE requests SET payment_status = ?, amount_paid = total_amount WHERE request_id = ? AND admin_id = ?");
+                $upd->bind_param('sii', $new_status, $request_id, $current_admin_id);
+            }
         } else {
-            $upd = $conn->prepare("UPDATE requests SET payment_status = ? WHERE request_id = ? AND admin_id = ?");
-            $upd->bind_param('sii', $new_status, $request_id, $current_admin_id);
+            // When marking as unpaid, just change status
+            if ($is_super_admin) {
+                $upd = $conn->prepare("UPDATE requests SET payment_status = ? WHERE request_id = ?");
+                $upd->bind_param('si', $new_status, $request_id);
+            } else {
+                $upd = $conn->prepare("UPDATE requests SET payment_status = ? WHERE request_id = ? AND admin_id = ?");
+                $upd->bind_param('sii', $new_status, $request_id, $current_admin_id);
+            }
         }
         $upd->execute();
     }

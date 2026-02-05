@@ -196,3 +196,8 @@ $conn->query("UPDATE requests SET admin_id = 1 WHERE admin_id IS NULL OR admin_i
 $conn->query("UPDATE books_received SET admin_id = 1 WHERE admin_id IS NULL OR admin_id = 0");
 $conn->query("UPDATE lecturer_payments SET admin_id = 1 WHERE admin_id IS NULL OR admin_id = 0");
 
+// Include cache helper and ensure indexes for performance
+if (file_exists(__DIR__ . '/cache_helper.php')) {
+    require_once __DIR__ . '/cache_helper.php';
+    ensure_db_indexes($conn);
+}

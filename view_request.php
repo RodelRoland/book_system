@@ -12,7 +12,6 @@ $semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
 $current_admin_id = intval($_SESSION['admin_id'] ?? 0);
 $current_admin_role = $_SESSION['admin_role'] ?? 'rep';
 $is_super_admin = ($current_admin_role === 'super_admin');
-$admin_filter = $is_super_admin ? '' : "AND r.admin_id = $current_admin_id";
 
 // Create table to track returned balances (safe if already exists)
 $conn->query("CREATE TABLE IF NOT EXISTS balance_returns (
@@ -65,7 +64,7 @@ if (isset($_GET['return_balance'], $_GET['request_id'], $_GET['student_id'])) {
 
 
 // 1. Capture search input
-$search = isset($_GET['search']) ? $conn->real_escape_string($_GET['search']) : '';
+$search = isset($_GET['search']) ? trim($_GET['search']) : '';
 
 $collection_filter = isset($_GET['collection_filter']) ? $_GET['collection_filter'] : 'all';
 if (!in_array($collection_filter, ['all', 'not_taken'], true)) {
@@ -77,8 +76,9 @@ if ($collection_filter === 'not_taken') {
     $having_sql = "HAVING pending_items > 0";
 }
 
+// 2. SQL Query using prepared statement for search
+$search_pattern = '%' . $search . '%';
 
-// 2. SQL Query
 $sql = "SELECT 
             r.request_id, r.student_id,
             s.full_name, s.index_number, s.phone,
@@ -98,19 +98,26 @@ $sql = "SELECT
             WHERE request_id IS NOT NULL
             GROUP BY request_id
         ) br ON r.request_id = br.request_id
-        WHERE r.semester_id = $semester_id
-          $admin_filter
+        WHERE r.semester_id = ?
+          " . ($is_super_admin ? '' : "AND r.admin_id = ?") . "
           AND (
-               s.full_name LIKE '%$search%' 
-           OR s.index_number LIKE '%$search%' 
-           OR s.phone LIKE '%$search%'
-           OR b.book_title LIKE '%$search%'
+               s.full_name LIKE ? 
+           OR s.index_number LIKE ? 
+           OR s.phone LIKE ?
+           OR b.book_title LIKE ?
           )
         GROUP BY r.request_id
         $having_sql
         ORDER BY r.created_at DESC";
 
-$result = $conn->query($sql);
+$stmt = $conn->prepare($sql);
+if ($is_super_admin) {
+    $stmt->bind_param("issss", $semester_id, $search_pattern, $search_pattern, $search_pattern, $search_pattern);
+} else {
+    $stmt->bind_param("iissss", $semester_id, $current_admin_id, $search_pattern, $search_pattern, $search_pattern, $search_pattern);
+}
+$stmt->execute();
+$result = $stmt->get_result();
 ?>
 <!DOCTYPE html>
 <html lang="en">

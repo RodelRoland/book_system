@@ -23,13 +23,17 @@ if ($rep_id <= 0) {
     }
 }
 
-/* Fetch ONLY available books */
-$books = $conn->query("
-    SELECT book_id, book_title, price
-    FROM books
-    WHERE availability = 'available'
-    ORDER BY book_title ASC
-");
+/* Fetch ONLY available books (with caching for performance) */
+$books_array = function_exists('get_cached_books') ? get_cached_books($conn, true) : [];
+if (empty($books_array)) {
+    $books_result = $conn->query("SELECT book_id, book_title, price FROM books WHERE availability = 'available' ORDER BY book_title ASC");
+    $books_array = [];
+    if ($books_result) {
+        while ($row = $books_result->fetch_assoc()) {
+            $books_array[] = $row;
+        }
+    }
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -108,12 +112,12 @@ $books = $conn->query("
                 ← Back
             </button>
 
-            <?php if ($books->num_rows === 0) { ?>
+            <?php if (empty($books_array)) { ?>
                 <div class="empty-state">
                     No books are currently available.
                 </div>
             <?php } else { ?>
-                <?php while ($row = $books->fetch_assoc()) { ?>
+                <?php foreach ($books_array as $row) { ?>
                     <label class="book-item">
                         <input
                                 type="checkbox"
