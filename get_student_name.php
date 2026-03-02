@@ -1,13 +1,24 @@
 <?php
-include 'db.php';
+session_start();
+require_once 'db.php';
 
 // Turn off error reporting to prevent HTML error messages from breaking the response
 error_reporting(0); 
 
-if (isset($_POST['index_number'])) {
-    $index = $conn->real_escape_string($_POST['index_number']);
-    $sql = "SELECT full_name FROM students WHERE index_number = '$index' LIMIT 1";
-    $result = $conn->query($sql);
+if (!isset($_SESSION['admin_logged_in'])) {
+    echo "Unauthorized";
+    exit;
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['index_number'])) {
+    $index = substr(trim(strval($_POST['index_number'] ?? '')), 0, 50);
+    $result = null;
+    $stmt = $conn->prepare("SELECT full_name FROM students WHERE index_number = ? LIMIT 1");
+    if ($stmt) {
+        $stmt->bind_param('s', $index);
+        $stmt->execute();
+        $result = $stmt->get_result();
+    }
 
     if ($result && $result->num_rows > 0) {
         $row = $result->fetch_assoc();

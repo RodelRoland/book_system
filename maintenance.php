@@ -15,23 +15,33 @@ if (($_SESSION['admin_role'] ?? '') !== 'super_admin') {
 
 $message = "";
 
+$csrf_token = csrf_get_token();
+
 /* Clear requests & request items */
 if (isset($_POST['clear_requests'])) {
+    if (!csrf_validate($_POST['csrf_token'] ?? null)) {
+        $message = 'Invalid request. Please refresh and try again.';
+    } else {
 
     $conn->query("DELETE FROM request_items");
     $conn->query("DELETE FROM requests");
 
     $message = "All requests and request items have been cleared successfully.";
+    }
 }
 
 /* Clear students (DANGEROUS) */
 if (isset($_POST['clear_students'])) {
+    if (!csrf_validate($_POST['csrf_token'] ?? null)) {
+        $message = 'Invalid request. Please refresh and try again.';
+    } else {
 
     $conn->query("DELETE FROM request_items");
     $conn->query("DELETE FROM requests");
     $conn->query("DELETE FROM students");
 
     $message = "All students and related data have been cleared successfully.";
+    }
 }
 ?>
 
@@ -156,6 +166,7 @@ if (isset($_POST['clear_students'])) {
             Books, prices, availability, and students will remain intact.
         </p>
         <form method="post" onsubmit="return confirm('Are you sure you want to clear ALL requests? This cannot be undone.');">
+            <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
             <button type="submit" name="clear_requests" class="btn btn-warning">
                 Clear All Requests
             </button>
@@ -172,6 +183,7 @@ if (isset($_POST['clear_students'])) {
         </ul>
         <p><strong>This action cannot be undone.</strong></p>
         <form method="post" onsubmit="return confirm('THIS WILL DELETE ALL STUDENTS AND REQUESTS. Are you absolutely sure?');">
+            <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
             <button type="submit" name="clear_students" class="btn btn-danger">
                 Clear Students & Reset System
             </button>

@@ -20,8 +20,13 @@ $success_msg = '';
 $error_msg = '';
 $viewing_rep = null;
 
+$csrf_token = csrf_get_token();
+
 // Handle access code submission
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['enter_code'])) {
+    if (!csrf_validate($_POST['csrf_token'] ?? null)) {
+        $error_msg = 'Invalid request. Please refresh and try again.';
+    } else {
     $access_code = strtoupper(trim($_POST['access_code'] ?? ''));
     
     if ($access_code !== '') {
@@ -46,10 +51,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['enter_code'])) {
     } else {
         $error_msg = "Please enter an access code.";
     }
+    }
 }
 
 // Handle stop viewing
 if (isset($_GET['stop_viewing'])) {
+    if (!csrf_validate($_GET['csrf_token'] ?? null)) {
+        header('Location: view_rep_data.php?msg=csrf_invalid');
+        exit;
+    }
     unset($_SESSION['viewing_rep_id']);
     unset($_SESSION['viewing_rep_name']);
     unset($_SESSION['viewing_rep_class']);
@@ -71,10 +81,24 @@ $reps_sql = "
         a.class_name,
         a.is_active,
         a.access_code IS NOT NULL AND a.access_code_expires > NOW() AS has_valid_code,
-        (SELECT COUNT(*) FROM requests r WHERE r.admin_id = a.admin_id AND r.semester_id = $semester_id) as request_count,
-        (SELECT COALESCE(SUM(total_amount), 0) FROM requests r WHERE r.admin_id = a.admin_id AND r.payment_status = 'paid' AND r.semester_id = $semester_id) as total_collected,
-        (SELECT COALESCE(SUM(amount_paid), 0) FROM lecturer_payments lp WHERE lp.admin_id = a.admin_id AND lp.semester_id = $semester_id) as paid_to_lecturers
+        COALESCE(rs.request_count, 0) as request_count,
+        COALESCE(rs.total_collected, 0) as total_collected,
+        COALESCE(lps.paid_to_lecturers, 0) as paid_to_lecturers
     FROM admins a
+    LEFT JOIN (
+        SELECT admin_id,
+               COUNT(*) AS request_count,
+               SUM(CASE WHEN payment_status = 'paid' THEN total_amount ELSE 0 END) AS total_collected
+        FROM requests
+        WHERE semester_id = $semester_id
+        GROUP BY admin_id
+    ) rs ON rs.admin_id = a.admin_id
+    LEFT JOIN (
+        SELECT admin_id, SUM(amount_paid) AS paid_to_lecturers
+        FROM lecturer_payments
+        WHERE semester_id = $semester_id
+        GROUP BY admin_id
+    ) lps ON lps.admin_id = a.admin_id
     WHERE a.role = 'rep'
     ORDER BY a.full_name ASC
 ";
@@ -315,7 +339,7 @@ if ($viewing_rep_id) {
                 Currently viewing: <strong><?php echo htmlspecialchars($viewing_rep_name); ?></strong>
                 <?php if ($viewing_rep_class): ?> (<?php echo htmlspecialchars($viewing_rep_class); ?>)<?php endif; ?>
             </div>
-            <a href="?stop_viewing=1" class="stop-btn">✕ Stop Viewing</a>
+            <a href="?stop_viewing=1&csrf_token=<?php echo urlencode($csrf_token); ?>" class="stop-btn">✕ Stop Viewing</a>
         </div>
         
         <div class="card">
@@ -397,6 +421,7 @@ if ($viewing_rep_id) {
         <div class="card">
             <h2>Enter Access Code</h2>
             <form method="POST" class="code-form">
+                <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
                 <div class="form-group">
                     <label>Access Code (from Rep)</label>
                     <input type="text" name="access_code" placeholder="XXXXXXXX" maxlength="8" required>

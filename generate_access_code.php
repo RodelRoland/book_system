@@ -237,11 +237,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['revoke_code'])) {
             
             <div class="actions">
                 <form method="POST">
+                    <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
                     <input type="hidden" name="generate_code" value="1">
                     <input type="hidden" name="duration" value="24">
                     <button type="submit" class="btn btn-primary">🔄 Generate New Code</button>
                 </form>
                 <form method="POST" onsubmit="return confirm('Revoke access code? Super admin will no longer be able to view your data.');">
+                    <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
                     <input type="hidden" name="revoke_code" value="1">
                     <button type="submit" class="btn btn-danger">🚫 Revoke Access</button>
                 </form>
@@ -253,6 +255,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['revoke_code'])) {
             </div>
             
             <form method="POST" style="margin-top: 20px;">
+                <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
                 <div class="form-group">
                     <label>Code Validity Duration</label>
                     <select name="duration">

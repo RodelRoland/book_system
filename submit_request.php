@@ -1,11 +1,20 @@
 <?php
-include 'db.php';
+session_start();
+require_once 'db.php';
+
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    header('Location: index.php');
+    exit;
+}
+
+if (!csrf_validate($_POST['csrf_token'] ?? null)) {
+    die('Invalid request. Please refresh and try again.');
+}
 
 $index_number = $_POST['index_number'] ?? '';
 $full_name = $_POST['full_name'] ?? '';
 $phone = $_POST['phone'] ?? '';
 $books = $_POST['books'] ?? [];
-$total_amount = floatval($_POST['total_amount'] ?? 0);
 $rep_id = intval($_POST['rep_id'] ?? 0);
 
 // If no rep specified, get default super admin
@@ -53,6 +62,78 @@ if ($check->num_rows > 0) {
     $student_id = $conn->insert_id;
 }
 
+// Check for duplicate books in the same semester
+$semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
+$duplicate_titles = [];
+foreach ($books as $book_id) {
+    $book_id = intval($book_id);
+    if ($book_id <= 0) continue;
+    $dup_stmt = $conn->prepare("SELECT b.book_title FROM request_items ri JOIN requests r ON ri.request_id = r.request_id JOIN books b ON ri.book_id = b.book_id WHERE r.student_id = ? AND r.semester_id = ? AND ri.book_id = ? LIMIT 1");
+    if ($dup_stmt) {
+        $dup_stmt->bind_param('iii', $student_id, $semester_id, $book_id);
+        $dup_stmt->execute();
+        $dup_res = $dup_stmt->get_result();
+        if ($dup_res && $dup_res->num_rows > 0) {
+            $duplicate_titles[] = $dup_res->fetch_assoc()['book_title'];
+        }
+    }
+}
+if (!empty($duplicate_titles)) {
+    die("Duplicate Request: You have already requested: " . htmlspecialchars(implode(', ', $duplicate_titles)));
+}
+
+$total_amount = 0.0;
+$book_prices = [];
+$price_date = date('Y-m-d');
+foreach ($books as $book_id) {
+    $book_id = intval($book_id);
+    if ($book_id <= 0) {
+        continue;
+    }
+
+    $unit_price = null;
+    $hpstmt = $conn->prepare("SELECT new_price FROM book_price_history WHERE book_id = ? AND effective_date IS NOT NULL AND effective_date <= ? ORDER BY effective_date DESC, history_id DESC LIMIT 1");
+    if ($hpstmt) {
+        $hpstmt->bind_param('is', $book_id, $price_date);
+        $hpstmt->execute();
+        $hpres = $hpstmt->get_result();
+        if ($hpres && $hpres->num_rows === 1) {
+            $unit_price = floatval($hpres->fetch_assoc()['new_price']);
+        }
+    }
+
+    if ($unit_price === null) {
+        $hnstmt = $conn->prepare("SELECT old_price FROM book_price_history WHERE book_id = ? AND effective_date IS NOT NULL AND effective_date > ? ORDER BY effective_date ASC, history_id ASC LIMIT 1");
+        if ($hnstmt) {
+            $hnstmt->bind_param('is', $book_id, $price_date);
+            $hnstmt->execute();
+            $hnres = $hnstmt->get_result();
+            if ($hnres && $hnres->num_rows === 1) {
+                $unit_price = floatval($hnres->fetch_assoc()['old_price']);
+            }
+        }
+    }
+
+    if ($unit_price === null) {
+        $pstmt = $conn->prepare("SELECT price FROM books WHERE book_id = ? LIMIT 1");
+        if ($pstmt) {
+            $pstmt->bind_param('i', $book_id);
+            $pstmt->execute();
+            $pres = $pstmt->get_result();
+            if ($pres && $pres->num_rows === 1) {
+                $unit_price = floatval($pres->fetch_assoc()['price']);
+            }
+        }
+    }
+
+    if ($unit_price === null) {
+        continue;
+    }
+
+    $book_prices[$book_id] = $unit_price;
+    $total_amount += $unit_price;
+}
+
 // Calculate how much credit to apply
 if ($credit_balance > 0) {
     if ($credit_balance >= $total_amount) {
@@ -78,19 +159,23 @@ if ($credit_balance > 0) {
     $payment_status = 'unpaid';
 }
 
-// Create request with credit applied as amount_paid
-$semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
-$stmt = $conn->prepare("INSERT INTO requests (student_id, total_amount, amount_paid, payment_status, semester_id, admin_id) VALUES (?, ?, ?, ?, ?, ?)");
-$stmt->bind_param("iddsii", $student_id, $total_amount, $credit_used, $payment_status, $semester_id, $rep_id);
+// Create request: amount_paid tracks actual cash/MoMo paid, credit_used tracks applied balance
+$amount_paid = 0.00;
+$stmt = $conn->prepare("INSERT INTO requests (student_id, total_amount, amount_paid, credit_used, payment_status, semester_id, admin_id) VALUES (?, ?, ?, ?, ?, ?, ?)");
+$stmt->bind_param("idddsii", $student_id, $total_amount, $amount_paid, $credit_used, $payment_status, $semester_id, $rep_id);
 $stmt->execute();
 
 $request_id = $conn->insert_id;
 
 // Save requested books using prepared statement
-$stmt = $conn->prepare("INSERT INTO request_items (request_id, book_id) VALUES (?, ?)");
+$stmt = $conn->prepare("INSERT INTO request_items (request_id, book_id, unit_price) VALUES (?, ?, ?)");
 foreach ($books as $book_id) {
     $book_id = intval($book_id);
-    $stmt->bind_param("ii", $request_id, $book_id);
+    if (!isset($book_prices[$book_id])) {
+        continue;
+    }
+    $unit_price = floatval($book_prices[$book_id]);
+    $stmt->bind_param("iid", $request_id, $book_id, $unit_price);
     $stmt->execute();
 }
 

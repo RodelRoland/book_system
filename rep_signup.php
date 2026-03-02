@@ -17,7 +17,12 @@ $pay_to_full_name = $super_admin ? (strval($super_admin['full_name'] ?? '') !== 
 $pay_to_momo_number = $super_admin ? (strval($super_admin['momo_number'] ?? '') !== '' ? $super_admin['momo_number'] : $fallback_momo_number) : $fallback_momo_number;
 $pay_to_account_name = $super_admin ? (strval($super_admin['account_name'] ?? '') !== '' ? $super_admin['account_name'] : $fallback_account_name) : $fallback_account_name;
 
+$csrf_token = csrf_get_token();
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!csrf_validate($_POST['csrf_token'] ?? null)) {
+        $error_msg = 'Invalid request. Please refresh and try again.';
+    } else {
     $username = substr(trim($_POST['username'] ?? ''), 0, 50);
     $full_name = substr(trim($_POST['full_name'] ?? ''), 0, 30);
     $class_name = substr(trim($_POST['class_name'] ?? ''), 0, 30);
@@ -48,6 +53,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $error_msg = "Failed to submit signup request. Please try again.";
             }
         }
+    }
     }
 }
 ?>
@@ -277,6 +283,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 <h3 style="margin-bottom: 6px; font-weight: 900;">Create your Rep Signup Request</h3>
                 <div class="muted" style="margin-bottom: 16px;">Choose a username you will remember. This will be used during login and password setup.</div>
                 <form method="post" autocomplete="off">
+                    <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
                     <div class="form-group">
                         <label>Username *</label>
                         <input type="text" name="username" required placeholder="e.g. rep_john">

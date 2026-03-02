@@ -13,29 +13,47 @@ $current_admin_id = intval($_SESSION['admin_id'] ?? 0);
 $current_admin_role = $_SESSION['admin_role'] ?? 'rep';
 $is_super_admin = ($current_admin_role === 'super_admin');
 
-// Create table to track returned balances (safe if already exists)
-$conn->query("CREATE TABLE IF NOT EXISTS balance_returns (
-    return_id INT AUTO_INCREMENT PRIMARY KEY,
-    student_id INT NOT NULL,
-    request_id INT NULL,
-    amount DECIMAL(10,2) NOT NULL,
-    return_date TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    notes VARCHAR(255) NULL,
-    INDEX idx_balance_returns_student (student_id),
-    INDEX idx_balance_returns_request (request_id)
-)");
+$page = max(1, intval($_GET['page'] ?? 1));
+$per_page = 100;
+$offset = ($page - 1) * $per_page;
 
 // Handle marking a balance as returned
 if (isset($_GET['return_balance'], $_GET['request_id'], $_GET['student_id'])) {
+    if (!csrf_validate($_GET['csrf_token'] ?? null)) {
+        header("Location: view_request.php?msg=csrf_invalid");
+        exit;
+    }
     $request_id = intval($_GET['request_id']);
     $student_id = intval($_GET['student_id']);
 
-    $req = $conn->query("SELECT total_amount, amount_paid FROM requests WHERE request_id = $request_id AND student_id = $student_id LIMIT 1");
+    if ($request_id <= 0 || $student_id <= 0) {
+        header("Location: view_request.php?msg=return_failed");
+        exit;
+    }
+
+    $req = null;
+    $req_stmt = $conn->prepare("SELECT total_amount, amount_paid, credit_used, admin_id FROM requests WHERE request_id = ? AND student_id = ? LIMIT 1");
+    if ($req_stmt) {
+        $req_stmt->bind_param('ii', $request_id, $student_id);
+        $req_stmt->execute();
+        $req = $req_stmt->get_result();
+    }
 
     if ($req && $req->num_rows === 1) {
         $req_row = $req->fetch_assoc();
 
-        $overpaid = max(0, floatval($req_row['amount_paid']) - floatval($req_row['total_amount']));
+        $request_admin_id = intval($req_row['admin_id'] ?? 0);
+        if (!$is_super_admin && $request_admin_id !== $current_admin_id) {
+            header("Location: view_request.php?msg=unauthorized");
+            exit;
+        }
+
+        $total_amount = floatval($req_row['total_amount']);
+        $amount_paid = floatval($req_row['amount_paid']);
+        $credit_used = floatval($req_row['credit_used'] ?? 0);
+        $due_after_credit = max(0, $total_amount - $credit_used);
+
+        $overpaid = max(0, $amount_paid - $due_after_credit);
 
         $total_return = $overpaid;
 
@@ -43,10 +61,29 @@ if (isset($_GET['return_balance'], $_GET['request_id'], $_GET['student_id'])) {
             $conn->begin_transaction();
             try {
                 if ($overpaid > 0) {
-                    $conn->query("UPDATE requests SET amount_paid = total_amount WHERE request_id = $request_id");
+                    $upd_stmt = $conn->prepare("UPDATE requests SET amount_paid = ? WHERE request_id = ?" . ($is_super_admin ? "" : " AND admin_id = ?"));
+                    if (!$upd_stmt) {
+                        throw new RuntimeException('Failed to prepare update.');
+                    }
+                    $new_amount_paid = (float) number_format($due_after_credit, 2, '.', '');
+                    if ($is_super_admin) {
+                        $upd_stmt->bind_param('di', $new_amount_paid, $request_id);
+                    } else {
+                        $upd_stmt->bind_param('dii', $new_amount_paid, $request_id, $current_admin_id);
+                    }
+                    if (!$upd_stmt->execute()) {
+                        throw new RuntimeException('Failed to update request.');
+                    }
                 }
-                $amount_sql = number_format($total_return, 2, '.', '');
-                $conn->query("INSERT INTO balance_returns (student_id, request_id, amount, notes) VALUES ($student_id, $request_id, $amount_sql, 'Returned to student')");
+                $amount_sql = (float) number_format($total_return, 2, '.', '');
+                $ins_stmt = $conn->prepare("INSERT INTO balance_returns (student_id, request_id, amount, notes) VALUES (?, ?, ?, 'Returned to student')");
+                if (!$ins_stmt) {
+                    throw new RuntimeException('Failed to prepare insert.');
+                }
+                $ins_stmt->bind_param('iid', $student_id, $request_id, $amount_sql);
+                if (!$ins_stmt->execute()) {
+                    throw new RuntimeException('Failed to insert balance return.');
+                }
                 $conn->commit();
                 header("Location: view_request.php?msg=returned&amount=$amount_sql");
                 exit;
@@ -71,53 +108,110 @@ if (!in_array($collection_filter, ['all', 'not_taken'], true)) {
     $collection_filter = 'all';
 }
 
-$having_sql = '';
-if ($collection_filter === 'not_taken') {
-    $having_sql = "HAVING pending_items > 0";
-}
-
-// 2. SQL Query using prepared statement for search
+// 2. Two-phase query for speed:
+//    (A) get matching request_ids using requests+students + EXISTS
+//    (B) fetch details only for those ids (build books_data/pending_items)
 $search_pattern = '%' . $search . '%';
 
-$sql = "SELECT 
-            r.request_id, r.student_id,
-            s.full_name, s.index_number, s.phone,
-            r.total_amount, r.amount_paid, r.payment_status, r.created_at,
-            COALESCE(br.refunded_amount, 0) AS refunded_amount,
-            br.last_return_date,
-            SUM(CASE WHEN ri.is_collected = 0 OR ri.is_collected IS NULL THEN 1 ELSE 0 END) AS pending_items,
-            GROUP_CONCAT(CONCAT(ri.item_id, ':', b.book_title, ':', ri.is_collected) SEPARATOR '|') AS books_data
+$ids_sql = "SELECT r.request_id
         FROM requests r
         JOIN students s ON r.student_id = s.student_id
-        LEFT JOIN request_items ri ON r.request_id = ri.request_id
-        LEFT JOIN books b ON ri.book_id = b.book_id
-
-        LEFT JOIN (
-            SELECT request_id, SUM(amount) AS refunded_amount, MAX(return_date) AS last_return_date
-            FROM balance_returns
-            WHERE request_id IS NOT NULL
-            GROUP BY request_id
-        ) br ON r.request_id = br.request_id
         WHERE r.semester_id = ?
-          " . ($is_super_admin ? '' : "AND r.admin_id = ?") . "
-          AND (
-               s.full_name LIKE ? 
-           OR s.index_number LIKE ? 
-           OR s.phone LIKE ?
-           OR b.book_title LIKE ?
-          )
-        GROUP BY r.request_id
-        $having_sql
-        ORDER BY r.created_at DESC";
+          " . ($is_super_admin ? '' : "AND r.admin_id = ?") . "";
 
-$stmt = $conn->prepare($sql);
+if ($collection_filter === 'not_taken') {
+    $ids_sql .= " AND EXISTS (
+        SELECT 1 FROM request_items ri2
+        WHERE ri2.request_id = r.request_id
+          AND (ri2.is_collected = 0 OR ri2.is_collected IS NULL)
+    )";
+}
+
+if ($search !== '') {
+    $ids_sql .= " AND (
+        s.full_name LIKE ?
+        OR s.index_number LIKE ?
+        OR s.phone LIKE ?
+        OR EXISTS (
+            SELECT 1
+            FROM request_items ri3
+            JOIN books b3 ON ri3.book_id = b3.book_id
+            WHERE ri3.request_id = r.request_id
+              AND b3.book_title LIKE ?
+        )
+    )";
+}
+
+$ids_sql .= " ORDER BY r.created_at DESC LIMIT ? OFFSET ?";
+
+$stmt = $conn->prepare($ids_sql);
+$request_ids = [];
 if ($is_super_admin) {
-    $stmt->bind_param("issss", $semester_id, $search_pattern, $search_pattern, $search_pattern, $search_pattern);
+    if ($search !== '') {
+        $stmt->bind_param("issssii", $semester_id, $search_pattern, $search_pattern, $search_pattern, $search_pattern, $per_page, $offset);
+    } else {
+        $stmt->bind_param("iii", $semester_id, $per_page, $offset);
+    }
 } else {
-    $stmt->bind_param("iissss", $semester_id, $current_admin_id, $search_pattern, $search_pattern, $search_pattern, $search_pattern);
+    if ($search !== '') {
+        $stmt->bind_param("iissssii", $semester_id, $current_admin_id, $search_pattern, $search_pattern, $search_pattern, $search_pattern, $per_page, $offset);
+    } else {
+        $stmt->bind_param("iiii", $semester_id, $current_admin_id, $per_page, $offset);
+    }
 }
 $stmt->execute();
-$result = $stmt->get_result();
+$ids_res = $stmt->get_result();
+if ($ids_res) {
+    while ($r = $ids_res->fetch_assoc()) {
+        $request_ids[] = intval($r['request_id']);
+    }
+}
+
+if (count($request_ids) > 0) {
+    $ids_in = implode(',', array_map('intval', $request_ids));
+
+    $details_sql = "SELECT 
+                r.request_id, r.student_id,
+                s.full_name, s.index_number, s.phone,
+                r.total_amount, r.amount_paid, r.credit_used, r.payment_status, r.created_at,
+                COALESCE(br.refunded_amount, 0) AS refunded_amount,
+                br.last_return_date,
+                SUM(CASE WHEN ri.is_collected = 0 OR ri.is_collected IS NULL THEN 1 ELSE 0 END) AS pending_items,
+                GROUP_CONCAT(CONCAT(ri.item_id, ':', b.book_title, ':', ri.is_collected) SEPARATOR '|' ) AS books_data
+            FROM requests r
+            JOIN students s ON r.student_id = s.student_id
+            LEFT JOIN request_items ri ON r.request_id = ri.request_id
+            LEFT JOIN books b ON ri.book_id = b.book_id
+
+            LEFT JOIN (
+                SELECT request_id, SUM(amount) AS refunded_amount, MAX(return_date) AS last_return_date
+                FROM balance_returns
+                WHERE request_id IS NOT NULL
+                GROUP BY request_id
+            ) br ON r.request_id = br.request_id
+            WHERE r.request_id IN ($ids_in)
+              AND r.semester_id = ?
+              " . ($is_super_admin ? '' : "AND r.admin_id = ?") . "
+            GROUP BY r.request_id
+            ORDER BY FIELD(r.request_id, $ids_in)";
+
+    $stmt = $conn->prepare($details_sql);
+    if ($is_super_admin) {
+        $stmt->bind_param("i", $semester_id);
+    } else {
+        $stmt->bind_param("ii", $semester_id, $current_admin_id);
+    }
+    $stmt->execute();
+    $result = $stmt->get_result();
+} else {
+    $result = null;
+}
+
+$show_next = (count($request_ids) === $per_page);
+$prev_page = max(1, $page - 1);
+$next_page = $page + 1;
+
+$csrf_token = csrf_get_token();
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -125,6 +219,7 @@ $result = $stmt->get_result();
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>View Requests</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.5.0/font/bootstrap-icons.css">
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { 
@@ -306,6 +401,15 @@ $result = $stmt->get_result();
             color: #888;
         }
         .empty-state .icon { font-size: 48px; margin-bottom: 15px; }
+        
+        .pagination {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 18px;
+            gap: 12px;
+        }
+        .page-indicator { color: #666; font-weight: 600; font-size: 13px; }
     </style>
 </head>
 <body>
@@ -313,10 +417,10 @@ $result = $stmt->get_result();
 <div class="page-container">
     <div class="page-header">
         <div>
-            <h1>📩 Student Requests</h1>
+            <h1><i class="bi bi-inbox"></i> Student Requests</h1>
             <p class="subtitle">Manage orders, payments & book collection</p>
         </div>
-        <a href="admin.php" class="back-btn">← Back to Dashboard</a>
+        <a href="admin.php" class="back-btn"><i class="bi bi-arrow-left"></i> Back to Dashboard</a>
     </div>
     
     <div class="card">
@@ -327,17 +431,16 @@ $result = $stmt->get_result();
             <div class="alert alert-error">Could not update collection status. Please try again. If it continues, check that the book has stock and exists in the database.</div>
         <?php endif; ?>
         <form method="GET" class="search-section">
-            <input type="text" name="search" class="search-input" 
-                   placeholder="Search by name, index number, phone or book..." 
+            <input type="text" name="search" class="search-input" placeholder="Search by name, index, phone, or book" 
                    value="<?php echo htmlspecialchars($search); ?>">
-            <select name="collection_filter" class="search-input" style="max-width: 260px; min-width: 220px;">
-                <option value="all" <?php echo ($collection_filter === 'all') ? 'selected' : ''; ?>>All Requests</option>
-                <option value="not_taken" <?php echo ($collection_filter === 'not_taken') ? 'selected' : ''; ?>>Not Taken (Not Collected Yet)</option>
+            <select name="collection_filter" class="search-input" style="max-width: 200px;">
+                <option value="all" <?php echo $collection_filter === 'all' ? 'selected' : ''; ?>>All</option>
+                <option value="not_taken" <?php echo $collection_filter === 'not_taken' ? 'selected' : ''; ?>>Not Taken</option>
             </select>
-            <button type="submit" class="btn btn-primary">🔍 Search</button>
+            <button type="submit" class="btn btn-primary"><i class="bi bi-search"></i> Search</button>
             <?php if (!empty($search)): ?>
                 <a href="view_request.php?collection_filter=<?php echo urlencode($collection_filter); ?>" class="btn btn-secondary">Clear</a>
-                <a href="export_excel.php?search=<?php echo urlencode($search); ?>&collection_filter=<?php echo urlencode($collection_filter); ?>" class="btn btn-success">📥 Export</a>
+                <a href="export_excel.php?search=<?php echo urlencode($search); ?>&collection_filter=<?php echo urlencode($collection_filter); ?>" class="btn btn-success"><i class="bi bi-download"></i> Export</a>
             <?php elseif ($collection_filter !== 'all'): ?>
                 <a href="view_request.php" class="btn btn-secondary">Clear</a>
             <?php endif; ?>
@@ -361,10 +464,13 @@ $result = $stmt->get_result();
                 <?php if ($result && $result->num_rows > 0): ?>
                     <?php while($row = $result->fetch_assoc()): ?>
                     <?php
-                        $request_balance = floatval($row['amount_paid']) - floatval($row['total_amount']);
-                        $balance_amount = max(0, $request_balance);
-                        $debit_amount = max(0, -$request_balance);
-                        $overpaid_amount = $balance_amount;
+                        $total_amount = floatval($row['total_amount']);
+                        $amount_paid = floatval($row['amount_paid']);
+                        $credit_used = floatval($row['credit_used'] ?? 0);
+                        $due_after_credit = max(0, $total_amount - $credit_used);
+                        $cash_overpaid = max(0, $amount_paid - $due_after_credit);
+                        $debit_amount = max(0, $due_after_credit - $amount_paid);
+                        $overpaid_amount = $cash_overpaid;
                         $refunded_amount = max(0, floatval($row['refunded_amount'] ?? 0));
                     ?>
                     <tr>
@@ -373,7 +479,7 @@ $result = $stmt->get_result();
                             <div class="student-info">
                                 <div class="name"><?php echo htmlspecialchars($row['full_name']); ?></div>
                                 <div class="index"><?php echo htmlspecialchars($row['index_number']); ?></div>
-                                <a href="student_history.php?index=<?php echo urlencode($row['index_number']); ?>" class="history-btn">📜 History</a>
+                                <a href="student_history.php?student_id=<?php echo intval($row['student_id']); ?>&index=<?php echo urlencode($row['index_number']); ?>" class="history-btn"><i class="bi bi-clock-history"></i> History</a>
                             </div>
                         </td>
                         <td>
@@ -385,8 +491,10 @@ $result = $stmt->get_result();
                                     if(count($parts) == 3) {
                                         list($item_id, $title, $is_collected) = $parts;
                                         $tagClass = ($is_collected == 1) ? 'tag-collected' : 'tag-pending';
-                                        $icon = ($is_collected == 1) ? '✓' : '○';
-                                        echo "<a href='toggle_book_collection.php?item_id=$item_id' class='book-tag $tagClass'>$icon $title</a>";
+                                        $icon = ($is_collected == 1) ? '<i class="bi bi-check-lg"></i>' : '<i class="bi bi-circle"></i>';
+                                        $item_id_int = intval($item_id);
+                                        $safe_title_attr = htmlspecialchars($title, ENT_QUOTES);
+                                        echo "<a href='toggle_book_collection.php?item_id={$item_id_int}&csrf_token=" . urlencode($csrf_token) . "' class='book-tag $tagClass' data-title='{$safe_title_attr}'>$icon $title</a>";
                                     }
                                 }
                             }
@@ -395,7 +503,7 @@ $result = $stmt->get_result();
                         <td><strong>GH₵ <?php echo number_format($row['total_amount'], 2); ?></strong></td>
                         <td>GH₵ <?php echo number_format($row['amount_paid'], 2); ?></td>
                         <td>
-                            <a href="toggle_payment.php?request_id=<?php echo $row['request_id']; ?>" 
+                            <a href="toggle_payment.php?request_id=<?php echo $row['request_id']; ?>&csrf_token=<?php echo urlencode($csrf_token); ?>" 
                                class="status-badge <?php echo ($row['payment_status'] == 'paid') ? 'status-paid' : 'status-unpaid'; ?>">
                                 <?php echo strtoupper($row['payment_status']); ?>
                             </a>
@@ -408,22 +516,22 @@ $result = $stmt->get_result();
                                 <?php endif; ?>
                             <?php elseif ($debit_amount > 0): ?>
                                 <div class="debit-amt">Owes: GH₵ <?php echo number_format($debit_amount, 2); ?></div>
-                            <?php elseif ($balance_amount > 0): ?>
-                                <div class="credit-amt">Balance: GH₵ <?php echo number_format($balance_amount, 2); ?></div>
+                            <?php elseif ($cash_overpaid > 0): ?>
+                                <div class="credit-amt">Balance: GH₵ <?php echo number_format($cash_overpaid, 2); ?></div>
                             <?php else: ?>
                                 <span class="zero-amt">—</span>
                             <?php endif; ?>
                         </td>
                         <td>
-                            <a href="edit_request.php?id=<?php echo $row['request_id']; ?>" class="action-btn action-edit" title="Edit">✏️</a>
+                            <a href="edit_request.php?id=<?php echo $row['request_id']; ?>" class="action-btn action-edit" title="Edit"><i class="bi bi-pencil-square"></i></a>
                             <?php if ($refunded_amount <= 0 && $overpaid_amount > 0): ?>
-                                <a href="view_request.php?return_balance=1&request_id=<?php echo $row['request_id']; ?>&student_id=<?php echo $row['student_id']; ?>" 
+                                <a href="view_request.php?return_balance=1&request_id=<?php echo $row['request_id']; ?>&student_id=<?php echo $row['student_id']; ?>&csrf_token=<?php echo urlencode($csrf_token); ?>" 
                                    class="action-btn action-return" 
                                    onclick="return confirm('Mark this balance as returned to the student?');" 
-                                   title="Mark Returned">💵</a>
+                                   title="Mark Returned"><i class="bi bi-cash-coin"></i></a>
                             <?php endif; ?>
-                            <a href="delete_request.php?id=<?php echo $row['request_id']; ?>" class="action-btn action-delete" 
-                               onclick="return confirm('Delete this request?');" title="Delete">🗑️</a>
+                            <a href="delete_request.php?id=<?php echo $row['request_id']; ?>&csrf_token=<?php echo urlencode($csrf_token); ?>" class="action-btn action-delete" 
+                               onclick="return confirm('Delete this request?');" title="Delete"><i class="bi bi-trash"></i></a>
                         </td>
                     </tr>
                     <?php endwhile; ?>
@@ -431,7 +539,7 @@ $result = $stmt->get_result();
                     <tr>
                         <td colspan="8">
                             <div class="empty-state">
-                                <div class="icon">📭</div>
+                                <div class="icon"><i class="bi bi-inbox"></i></div>
                                 <p>No requests found</p>
                             </div>
                         </td>
@@ -439,6 +547,20 @@ $result = $stmt->get_result();
                 <?php endif; ?>
                 </tbody>
             </table>
+        </div>
+
+        <div class="pagination">
+            <div>
+                <?php if ($page > 1): ?>
+                    <a class="btn btn-secondary" href="view_request.php?<?php echo http_build_query(array_merge($_GET, ['page' => $prev_page])); ?>"><i class="bi bi-arrow-left"></i> Prev</a>
+                <?php endif; ?>
+            </div>
+            <div class="page-indicator">Page <?php echo intval($page); ?></div>
+            <div>
+                <?php if ($show_next): ?>
+                    <a class="btn btn-secondary" href="view_request.php?<?php echo http_build_query(array_merge($_GET, ['page' => $next_page])); ?>">Next <i class="bi bi-arrow-right"></i></a>
+                <?php endif; ?>
+            </div>
         </div>
     </div>
 </div>
@@ -458,15 +580,16 @@ document.addEventListener('DOMContentLoaded', function() {
                 .then(response => response.json())
                 .then(data => {
                     if (data.success) {
+                        var title = link.getAttribute('data-title') || link.textContent.trim();
                         // Update tag appearance
                         if (data.is_collected === 1) {
                             link.classList.remove('tag-pending');
                             link.classList.add('tag-collected');
-                            link.innerHTML = '✓ ' + link.textContent.substring(2);
+                            link.innerHTML = '<i class="bi bi-check-lg"></i> ' + title;
                         } else {
                             link.classList.remove('tag-collected');
                             link.classList.add('tag-pending');
-                            link.innerHTML = '○ ' + link.textContent.substring(2);
+                            link.innerHTML = '<i class="bi bi-circle"></i> ' + title;
                         }
                     } else {
                         alert('Failed to toggle: ' + (data.error || 'Unknown error'));

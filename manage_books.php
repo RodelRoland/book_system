@@ -13,9 +13,13 @@ if (($_SESSION['admin_role'] ?? '') !== 'super_admin') {
     exit;
 }
 
+$current_admin_id = intval($_SESSION['admin_id'] ?? 0);
+
 $semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
 $auto_assigned_count = 0;
 $auto_assigned_total = 0;
+
+$csrf_token = csrf_get_token();
 
 /**
  * Auto-assign a book to students who have sufficient credit balance.
@@ -60,17 +64,19 @@ function auto_assign_book_to_students_with_balance($conn, $book_id, $book_price,
         $conn->begin_transaction();
         try {
             // Insert request
+            $amount_paid = 0.00;
+            $credit_used = $book_price;
             $req_stmt = $conn->prepare("
-                INSERT INTO requests (student_id, total_amount, amount_paid, payment_status, semester_id, admin_id, created_at) 
-                VALUES (?, ?, ?, 'paid', ?, ?, NOW())
+                INSERT INTO requests (student_id, total_amount, amount_paid, credit_used, payment_status, semester_id, admin_id, created_at) 
+                VALUES (?, ?, ?, ?, 'paid', ?, ?, NOW())
             ");
-            $req_stmt->bind_param("iddii", $student_id, $book_price, $book_price, $semester_id, $admin_id);
+            $req_stmt->bind_param("idddii", $student_id, $book_price, $amount_paid, $credit_used, $semester_id, $admin_id);
             $req_stmt->execute();
             $request_id = $conn->insert_id;
             
             // Insert request item
-            $item_stmt = $conn->prepare("INSERT INTO request_items (request_id, book_id, is_collected) VALUES (?, ?, 0)");
-            $item_stmt->bind_param("ii", $request_id, $book_id);
+            $item_stmt = $conn->prepare("INSERT INTO request_items (request_id, book_id, unit_price, is_collected) VALUES (?, ?, ?, 0)");
+            $item_stmt->bind_param("iid", $request_id, $book_id, $book_price);
             $item_stmt->execute();
             
             // Deduct from student's balance
@@ -93,6 +99,10 @@ function auto_assign_book_to_students_with_balance($conn, $book_id, $book_price,
 
 /* Add new book */
 if (isset($_POST['add_book'])) {
+    if (!csrf_validate($_POST['csrf_token'] ?? null)) {
+        header('Location: manage_books.php?msg=csrf_invalid');
+        exit;
+    }
     $title = trim($_POST['book_title']);
     $price = floatval($_POST['price']);
     $stock_quantity = intval($_POST['stock_quantity'] ?? 0);
@@ -116,12 +126,26 @@ if (isset($_POST['add_book'])) {
 
 /* Update book (price or availability) */
 if (isset($_POST['update_book'])) {
+    if (!csrf_validate($_POST['csrf_token'] ?? null)) {
+        header('Location: manage_books.php?msg=csrf_invalid');
+        exit;
+    }
     $book_id = intval($_POST['book_id']);
     $price = floatval($_POST['price']);
+    $effective_date = trim(strval($_POST['effective_date'] ?? ''));
     $stock_quantity = intval($_POST['stock_quantity'] ?? 0);
     $availability = $_POST['availability'] === 'out_of_stock'
         ? 'out_of_stock'
         : 'available';
+
+    $today = date('Y-m-d');
+    if ($effective_date === '') {
+        $effective_date = $today;
+    }
+    $dt = DateTime::createFromFormat('Y-m-d', $effective_date);
+    if (!$dt || $dt->format('Y-m-d') !== $effective_date) {
+        $effective_date = $today;
+    }
 
     // Stock quantity is optional - don't force out_of_stock based on quantity
     // Only use the availability dropdown selection
@@ -134,15 +158,51 @@ if (isset($_POST['update_book'])) {
     $prev_book = $prev_result->fetch_assoc();
     $was_unavailable = ($prev_book && $prev_book['availability'] === 'out_of_stock');
     $price_changed = ($prev_book && floatval($prev_book['price']) != $price);
+    $old_price = $prev_book ? floatval($prev_book['price']) : null;
+
+    $schedule_price_change = ($price_changed && $effective_date > $today);
+
+    if ($price_changed && $old_price !== null) {
+        $sup = $conn->prepare("UPDATE book_price_history SET applied_at = NOW(), notes = CONCAT(IFNULL(notes, ''), IF(IFNULL(notes,'')='', '', ' | '), 'superseded') WHERE book_id = ? AND applied_at IS NULL AND effective_date IS NOT NULL AND effective_date > ?");
+        if ($sup) {
+            $sup->bind_param('is', $book_id, $today);
+            $sup->execute();
+        }
+    }
     
-    $upd_stmt = $conn->prepare("UPDATE books SET price = ?, stock_quantity = ?, availability = ? WHERE book_id = ?");
-    $upd_stmt->bind_param("disi", $price, $stock_quantity, $availability, $book_id);
-    $upd_stmt->execute();
+    if ($schedule_price_change) {
+        $upd_stmt = $conn->prepare("UPDATE books SET stock_quantity = ?, availability = ? WHERE book_id = ?");
+        $upd_stmt->bind_param("isi", $stock_quantity, $availability, $book_id);
+        $upd_stmt->execute();
+    } else {
+        $upd_stmt = $conn->prepare("UPDATE books SET price = ?, stock_quantity = ?, availability = ? WHERE book_id = ?");
+        $upd_stmt->bind_param("disi", $price, $stock_quantity, $availability, $book_id);
+        $upd_stmt->execute();
+    }
+
+    if ($price_changed && $old_price !== null) {
+        $hstmt = $conn->prepare("INSERT INTO book_price_history (book_id, old_price, new_price, changed_by_admin_id, effective_date, applied_at) VALUES (?, ?, ?, ?, ?, ?)");
+        if ($hstmt) {
+            $applied_at = $schedule_price_change ? null : date('Y-m-d H:i:s');
+            $hstmt->bind_param('iddiss', $book_id, $old_price, $price, $current_admin_id, $effective_date, $applied_at);
+            $hstmt->execute();
+        }
+    }
+
+    if ($price_changed && $old_price !== null && !$schedule_price_change && $semester_id > 0) {
+        $upd_items = $conn->prepare("UPDATE request_items ri\n            JOIN requests r ON r.request_id = ri.request_id\n            SET ri.unit_price = ?\n            WHERE ri.book_id = ?\n              AND r.payment_status = 'unpaid'\n              AND r.semester_id = ?\n              AND DATE(r.created_at) >= ?");
+        if ($upd_items) {
+            $upd_items->bind_param('diis', $price, $book_id, $semester_id, $effective_date);
+            $upd_items->execute();
+
+            $conn->query("UPDATE requests r\n                JOIN (SELECT request_id, SUM(COALESCE(unit_price, 0)) AS total_amount_calc FROM request_items GROUP BY request_id) x\n                    ON x.request_id = r.request_id\n                SET r.total_amount = x.total_amount_calc,\n                    r.payment_status = CASE WHEN (COALESCE(r.amount_paid,0) + COALESCE(r.credit_used,0)) >= COALESCE(x.total_amount_calc,0) THEN 'paid' ELSE 'unpaid' END\n                WHERE r.semester_id = " . intval($semester_id) . " AND r.payment_status = 'unpaid'");
+        }
+    }
     
     if (function_exists('clear_books_cache')) clear_books_cache();
     
     // Auto-assign if book is now available (was unavailable OR price changed)
-    if ($availability === 'available' && $price > 0 && ($was_unavailable || $price_changed)) {
+    if ($availability === 'available' && $price > 0 && ($was_unavailable || ($price_changed && !$schedule_price_change))) {
         $result = auto_assign_book_to_students_with_balance($conn, $book_id, $price, $semester_id);
         $auto_assigned_count = $result['count'];
         $auto_assigned_total = $result['total'];
@@ -150,7 +210,30 @@ if (isset($_POST['update_book'])) {
 }
 
 /* Fetch all books */
-$books = $conn->query("SELECT * FROM books ORDER BY book_title ASC");
+$books = $conn->query("SELECT 
+    b.*,
+    (
+        SELECT bph.new_price
+        FROM book_price_history bph
+        WHERE bph.book_id = b.book_id
+          AND bph.applied_at IS NULL
+          AND bph.effective_date IS NOT NULL
+          AND bph.effective_date > CURDATE()
+        ORDER BY bph.effective_date DESC, bph.history_id DESC
+        LIMIT 1
+    ) AS scheduled_new_price,
+    (
+        SELECT bph.effective_date
+        FROM book_price_history bph
+        WHERE bph.book_id = b.book_id
+          AND bph.applied_at IS NULL
+          AND bph.effective_date IS NOT NULL
+          AND bph.effective_date > CURDATE()
+        ORDER BY bph.effective_date DESC, bph.history_id DESC
+        LIMIT 1
+    ) AS scheduled_effective_date
+    FROM books b
+    ORDER BY b.book_title ASC");
 ?>
 
 <!DOCTYPE html>
@@ -387,6 +470,7 @@ $books = $conn->query("SELECT * FROM books ORDER BY book_title ASC");
             <?php endif; ?>
             <h2><span class="icon">➕</span> Add New Book</h2>
             <form method="post">
+                <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
                 <div class="form-group">
                     <label>Book Title</label>
                     <input type="text" name="book_title" placeholder="Enter book title" required>
@@ -413,6 +497,7 @@ $books = $conn->query("SELECT * FROM books ORDER BY book_title ASC");
                         <tr>
                             <th>Book Title</th>
                             <th>Price (GH₵)</th>
+                            <th>Effective Date</th>
                             <th>Stock</th>
                             <th>Status</th>
                             <th>Action</th>
@@ -422,10 +507,19 @@ $books = $conn->query("SELECT * FROM books ORDER BY book_title ASC");
                         <?php while ($row = $books->fetch_assoc()): ?>
                         <tr>
                             <form method="post">
+                                <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
                                 <td class="book-title"><?php echo htmlspecialchars($row['book_title']); ?></td>
                                 <td>
                                     <input type="number" step="0.01" name="price" 
                                            class="price-input" value="<?php echo $row['price']; ?>">
+                                    <?php if (!empty($row['scheduled_new_price']) && !empty($row['scheduled_effective_date'])): ?>
+                                        <div style="margin-top:6px; font-size: 12px; color: #6c757d; font-weight: 600;">
+                                            Scheduled: GH₵ <?php echo number_format(floatval($row['scheduled_new_price']), 2); ?> on <?php echo htmlspecialchars($row['scheduled_effective_date']); ?>
+                                        </div>
+                                    <?php endif; ?>
+                                </td>
+                                <td>
+                                    <input type="date" name="effective_date" class="price-input" style="width: 155px; text-align: left;" value="<?php echo htmlspecialchars($row['scheduled_effective_date'] ?: date('Y-m-d')); ?>">
                                 </td>
                                 <td>
                                     <input type="number" name="stock_quantity" min="0" 

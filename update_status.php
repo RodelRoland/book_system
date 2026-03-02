@@ -13,6 +13,10 @@ $current_admin_role = $_SESSION['admin_role'] ?? 'rep';
 $is_super_admin = ($current_admin_role === 'super_admin');
 
 if (isset($_GET['id'])) {
+    if (!csrf_validate($_GET['csrf_token'] ?? null)) {
+        header("Location: view_request.php?msg=csrf_invalid");
+        exit;
+    }
     // Get the ID from the URL and make sure it's a number
     $request_id = intval($_GET['id']);
 
@@ -23,10 +27,10 @@ if (isset($_GET['id'])) {
 
     // Update the payment status in the database
     if ($is_super_admin) {
-        $stmt = $conn->prepare("UPDATE requests SET payment_status = 'paid' WHERE request_id = ?");
+        $stmt = $conn->prepare("UPDATE requests SET payment_status = 'paid', amount_paid = GREATEST(0, total_amount - credit_used) WHERE request_id = ?");
         $stmt->bind_param('i', $request_id);
     } else {
-        $stmt = $conn->prepare("UPDATE requests SET payment_status = 'paid' WHERE request_id = ? AND admin_id = ?");
+        $stmt = $conn->prepare("UPDATE requests SET payment_status = 'paid', amount_paid = GREATEST(0, total_amount - credit_used) WHERE request_id = ? AND admin_id = ?");
         $stmt->bind_param('ii', $request_id, $current_admin_id);
     }
 

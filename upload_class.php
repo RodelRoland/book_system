@@ -16,9 +16,13 @@ $error_msg = '';
 $imported_count = 0;
 $skipped_count = 0;
 
+$csrf_token = csrf_get_token();
+
 // Handle CSV upload
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['upload_csv'])) {
-    if (isset($_FILES['csv_file']) && $_FILES['csv_file']['error'] === UPLOAD_ERR_OK) {
+    if (!csrf_validate($_POST['csrf_token'] ?? null)) {
+        $error_msg = 'Invalid request. Please refresh and try again.';
+    } elseif (isset($_FILES['csv_file']) && $_FILES['csv_file']['error'] === UPLOAD_ERR_OK) {
         $file = $_FILES['csv_file']['tmp_name'];
         $handle = fopen($file, 'r');
         
@@ -66,10 +70,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['upload_csv'])) {
     } else {
         $error_msg = "Please select a valid CSV file to upload.";
     }
+    }
 }
 
 // Handle manual add
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_student'])) {
+    if (!csrf_validate($_POST['csrf_token'] ?? null)) {
+        $error_msg = 'Invalid request. Please refresh and try again.';
+    } else {
     $index_number = trim($_POST['index_number'] ?? '');
     $student_name = trim($_POST['student_name'] ?? '');
     
@@ -84,10 +92,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_student'])) {
     } else {
         $error_msg = "Please fill in both index number and student name.";
     }
+    }
 }
 
 // Handle delete
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_student'])) {
+    if (!csrf_validate($_POST['csrf_token'] ?? null)) {
+        $error_msg = 'Invalid request. Please refresh and try again.';
+    } else {
     $id = intval($_POST['student_id'] ?? 0);
     if ($id > 0) {
         $stmt = $conn->prepare("DELETE FROM class_students WHERE id = ? AND admin_id = ?");
@@ -98,10 +110,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_student'])) {
             $error_msg = "Error removing student.";
         }
     }
+    }
 }
 
 // Handle clear all
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['clear_all'])) {
+    if (!csrf_validate($_POST['csrf_token'] ?? null)) {
+        $error_msg = 'Invalid request. Please refresh and try again.';
+    } else {
     $stmt = $conn->prepare("DELETE FROM class_students WHERE admin_id = ?");
     $stmt->bind_param("i", $current_admin_id);
     if ($stmt->execute()) {
@@ -109,18 +125,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['clear_all'])) {
     } else {
         $error_msg = "Error clearing class list.";
     }
+    }
 }
 
 // Fetch current class students
 $search = trim($_GET['search'] ?? '');
-$search_cond = '';
+$students_result = null;
+$total_students = 0;
+
 if ($search !== '') {
-    $search_esc = $conn->real_escape_string($search);
-    $search_cond = "AND (index_number LIKE '%$search_esc%' OR student_name LIKE '%$search_esc%')";
+    $like = '%' . $search . '%';
+    $stmt = $conn->prepare("SELECT * FROM class_students WHERE admin_id = ? AND (index_number LIKE ? OR student_name LIKE ?) ORDER BY student_name ASC LIMIT 500");
+    if ($stmt) {
+        $stmt->bind_param('iss', $current_admin_id, $like, $like);
+        $stmt->execute();
+        $students_result = $stmt->get_result();
+    }
+} else {
+    $stmt = $conn->prepare("SELECT * FROM class_students WHERE admin_id = ? ORDER BY student_name ASC LIMIT 500");
+    if ($stmt) {
+        $stmt->bind_param('i', $current_admin_id);
+        $stmt->execute();
+        $students_result = $stmt->get_result();
+    }
 }
 
-$students_result = $conn->query("SELECT * FROM class_students WHERE admin_id = $current_admin_id $search_cond ORDER BY student_name ASC LIMIT 500");
-$total_students = $conn->query("SELECT COUNT(*) AS c FROM class_students WHERE admin_id = $current_admin_id")->fetch_assoc()['c'] ?? 0;
+$cnt = $conn->prepare("SELECT COUNT(*) AS c FROM class_students WHERE admin_id = ?");
+if ($cnt) {
+    $cnt->bind_param('i', $current_admin_id);
+    $cnt->execute();
+    $cres = $cnt->get_result();
+    if ($cres && $cres->num_rows === 1) {
+        $total_students = intval($cres->fetch_assoc()['c'] ?? 0);
+    }
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -282,7 +320,8 @@ $total_students = $conn->query("SELECT COUNT(*) AS c FROM class_students WHERE a
             <p class="subtitle">Import your class roster to enable auto-fill for student names</p>
         </div>
         <a href="admin.php" class="back-btn">← Back to Dashboard</a>
-    </div>
+    </div>input type="hiden" name="csrf_token" value="<?php echo htmlspecalchars($csrf_token); ?>">
+                    <di
     
     <?php if ($success_msg): ?>
         <div class="alert alert-success"><?php echo htmlspecialchars($success_msg); ?></div>
@@ -300,7 +339,8 @@ $total_students = $conn->query("SELECT COUNT(*) AS c FROM class_students WHERE a
                     <div class="form-group">
                         <input type="file" name="csv_file" accept=".csv,.txt" required>
                     </div>
-                    <label class="checkbox-label">
+                    <label class="">
+                    <input type="hidden" name=ccsrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>"heckbox-label">
                         <input type="checkbox" name="skip_header" checked>
                         Skip first row (header)
                     </label>
@@ -321,7 +361,8 @@ $total_students = $conn->query("SELECT COUNT(*) AS c FROM class_students WHERE a
                         <input type="text" name="index_number" placeholder="e.g., PS/CSC/21/0001" required>
                     </div>
                     <div class="form-group">
-                        <label>Student Name</label>
+                        <label>Student Name</label>);">
+                <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token ?>
                         <input type="text" name="student_name" placeholder="e.g., John Doe" required>
                     </div>
                     <button type="submit" name="add_student" class="btn btn-success">Add Student</button>
@@ -350,7 +391,8 @@ $total_students = $conn->query("SELECT COUNT(*) AS c FROM class_students WHERE a
             <?php endif; ?>
         </form>
         
-        <?php if ($students_result && $students_result->num_rows > 0): ?>
+        <?php if ($students_result && $students_result->num_rows > 0): ?>);">
+                            <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token ?>
         <table>
             <thead>
                 <tr>

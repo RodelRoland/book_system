@@ -11,8 +11,13 @@ if (!isset($_SESSION['admin_logged_in']) || $_SESSION['admin_role'] !== 'super_a
 $success_msg = '';
 $error_msg = '';
 
+$csrf_token = csrf_get_token();
+
 // Handle form submissions
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!csrf_validate($_POST['csrf_token'] ?? null)) {
+        $error_msg = 'Invalid request. Please refresh and try again.';
+    } else {
     $action = $_POST['action'] ?? '';
     
     if ($action === 'create_rep') {
@@ -50,7 +55,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } elseif ($action === 'toggle_status') {
         $admin_id = intval($_POST['admin_id'] ?? 0);
         if ($admin_id > 0) {
-            $conn->query("UPDATE admins SET is_active = NOT is_active WHERE admin_id = $admin_id AND role = 'rep'");
+            $stmt = $conn->prepare("UPDATE admins SET is_active = NOT is_active WHERE admin_id = ? AND role = 'rep'");
+            if ($stmt) {
+                $stmt->bind_param('i', $admin_id);
+                $stmt->execute();
+            }
             $success_msg = "Account status updated.";
         }
     } elseif ($action === 'reset_password') {
@@ -79,6 +88,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $stmt->execute();
             $success_msg = "Rep details updated.";
         }
+    }
     }
 }
 
@@ -293,6 +303,7 @@ $reps = $conn->query("SELECT * FROM admins WHERE role = 'rep' ORDER BY created_a
     <div class="card">
         <h3 class="card-title">➕ Create New Rep Account</h3>
         <form method="POST">
+            <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
             <input type="hidden" name="action" value="create_rep">
             <div class="form-row">
                 <div class="form-group">
@@ -373,6 +384,7 @@ $reps = $conn->query("SELECT * FROM admins WHERE role = 'rep' ORDER BY created_a
                                         🔑 Reset
                                     </button>
                                     <form method="POST" style="display:inline;" onsubmit="return confirm('<?php echo $rep['is_active'] ? 'Deactivate' : 'Activate'; ?> this account?');">
+                                        <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
                                         <input type="hidden" name="action" value="toggle_status">
                                         <input type="hidden" name="admin_id" value="<?php echo $rep['admin_id']; ?>">
                                         <button type="submit" class="btn btn-sm <?php echo $rep['is_active'] ? 'btn-danger' : 'btn-success'; ?>">
@@ -405,6 +417,7 @@ $reps = $conn->query("SELECT * FROM admins WHERE role = 'rep' ORDER BY created_a
         <button type="button" class="modal-close" onclick="closeModal('editModal')">&times;</button>
         <h3 class="modal-title">✏️ Edit Rep Details</h3>
         <form method="POST">
+            <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
             <input type="hidden" name="action" value="update_rep">
             <input type="hidden" name="admin_id" id="edit_admin_id">
             <div class="form-group">
@@ -445,6 +458,7 @@ $reps = $conn->query("SELECT * FROM admins WHERE role = 'rep' ORDER BY created_a
         <h3 class="modal-title">🔑 Reset Password</h3>
         <p style="margin-bottom:15px; color:#666;" id="password_username_label"></p>
         <form method="POST">
+            <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
             <input type="hidden" name="action" value="reset_password">
             <input type="hidden" name="admin_id" id="password_admin_id">
             <div class="form-group">

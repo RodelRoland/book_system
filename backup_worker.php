@@ -303,12 +303,15 @@ try {
     // Ignore onboarding export failures so mysqldump backup still succeeds
 }
 
-$backupFileSql = $conn->real_escape_string($backupFile);
-$conn->query("UPDATE system_state
+$upd = $conn->prepare("UPDATE system_state
              SET last_backup_at = NOW(),
-                 last_backup_file = '{$backupFileSql}',
+                 last_backup_file = ?,
                  backup_in_progress = 0,
                  backup_started_at = NULL
              WHERE id = 1");
+if ($upd) {
+    $upd->bind_param('s', $backupFile);
+    $upd->execute();
+}
 
 echo "Backup created: {$backupFile}\n";

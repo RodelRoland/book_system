@@ -14,7 +14,12 @@ $generated_username = null;
 
 $current_admin_id = intval($_SESSION['admin_id'] ?? 0);
 
+$csrf_token = csrf_get_token();
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!csrf_validate($_POST['csrf_token'] ?? null)) {
+        $error_msg = 'Invalid request. Please refresh and try again.';
+    } else {
     $action = $_POST['action'] ?? '';
     $signup_id = intval($_POST['signup_id'] ?? 0);
 
@@ -76,6 +81,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             }
         }
+    }
     }
 }
 
@@ -225,11 +231,13 @@ $recent = $conn->query("SELECT * FROM rep_signup_requests WHERE status <> 'pendi
                             <td>
                                 <div class="actions">
                                     <form method="post" onsubmit="return confirm('Approve this request and generate first-time code?');">
+                                        <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
                                         <input type="hidden" name="action" value="approve">
                                         <input type="hidden" name="signup_id" value="<?php echo intval($r['signup_id']); ?>">
                                         <button type="submit" class="btn btn-approve">Approve</button>
                                     </form>
                                     <form method="post" onsubmit="return confirm('Reject this request?');">
+                                        <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
                                         <input type="hidden" name="action" value="reject">
                                         <input type="hidden" name="signup_id" value="<?php echo intval($r['signup_id']); ?>">
                                         <button type="submit" class="btn btn-reject">Reject</button>

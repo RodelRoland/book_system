@@ -12,6 +12,8 @@ $current_admin_id = intval($_SESSION['admin_id'] ?? 0);
 $current_admin_role = $_SESSION['admin_role'] ?? 'rep';
 $is_super_admin = ($current_admin_role === 'super_admin');
 
+$csrf_token = csrf_get_token();
+
 $request_id = intval($_GET['id']);
 if ($request_id <= 0) {
     header('Location: view_request.php?msg=invalid_request');
@@ -37,20 +39,37 @@ if (!$request) {
 
 // 2. Get currently selected book IDs for this request
 $current_books = [];
+$current_collected_by_book = [];
 $items_stmt = $conn->prepare("SELECT book_id FROM request_items WHERE request_id = ?");
 $items_stmt->bind_param('i', $request_id);
 $items_stmt->execute();
 $items_query = $items_stmt->get_result();
+
 if ($items_query) {
     while($item = $items_query->fetch_assoc()){
         $current_books[] = $item['book_id'];
     }
 }
 
+$items_stmt = $conn->prepare("SELECT book_id, is_collected FROM request_items WHERE request_id = ?");
+$items_stmt->bind_param('i', $request_id);
+$items_stmt->execute();
+$items_query = $items_stmt->get_result();
+if ($items_query) {
+    while ($item = $items_query->fetch_assoc()) {
+        $current_collected_by_book[intval($item['book_id'])] = intval($item['is_collected']);
+    }
+}
+
 // 3. Handle the Update Logic
 if ($_SERVER["REQUEST_METHOD"] == "POST") {
+    if (!csrf_validate($_POST['csrf_token'] ?? null)) {
+        header('Location: edit_request.php?id=' . $request_id . '&msg=csrf_invalid');
+        exit;
+    }
     $selected_books = isset($_POST['books']) ? $_POST['books'] : [];
     $amount_paid = floatval($_POST['amount_paid'] ?? 0);
+    $price_date = date('Y-m-d', strtotime($request['created_at'] ?? 'now'));
     
     // Delete old items for this request
     $del_stmt = $conn->prepare("DELETE FROM request_items WHERE request_id = ?");
@@ -60,27 +79,57 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
     $new_total = 0;
     foreach ($selected_books as $book_id) {
         $book_id = intval($book_id);
-        // Get book price to calculate new total
         if ($book_id <= 0) {
             continue;
         }
-        $b_stmt = $conn->prepare("SELECT price FROM books WHERE book_id = ? LIMIT 1");
-        $b_stmt->bind_param('i', $book_id);
-        $b_stmt->execute();
-        $b_res = $b_stmt->get_result();
-        $b_data = ($b_res && $b_res->num_rows === 1) ? $b_res->fetch_assoc() : null;
-        if (!$b_data) {
+
+        $unit_price = null;
+        $hpstmt = $conn->prepare("SELECT new_price FROM book_price_history WHERE book_id = ? AND effective_date IS NOT NULL AND effective_date <= ? ORDER BY effective_date DESC, history_id DESC LIMIT 1");
+        if ($hpstmt) {
+            $hpstmt->bind_param('is', $book_id, $price_date);
+            $hpstmt->execute();
+            $hpres = $hpstmt->get_result();
+            if ($hpres && $hpres->num_rows === 1) {
+                $unit_price = floatval($hpres->fetch_assoc()['new_price']);
+            }
+        }
+
+        if ($unit_price === null) {
+            $hnstmt = $conn->prepare("SELECT old_price FROM book_price_history WHERE book_id = ? AND effective_date IS NOT NULL AND effective_date > ? ORDER BY effective_date ASC, history_id ASC LIMIT 1");
+            if ($hnstmt) {
+                $hnstmt->bind_param('is', $book_id, $price_date);
+                $hnstmt->execute();
+                $hnres = $hnstmt->get_result();
+                if ($hnres && $hnres->num_rows === 1) {
+                    $unit_price = floatval($hnres->fetch_assoc()['old_price']);
+                }
+            }
+        }
+
+        if ($unit_price === null) {
+            $pstmt = $conn->prepare("SELECT price FROM books WHERE book_id = ? LIMIT 1");
+            $pstmt->bind_param('i', $book_id);
+            $pstmt->execute();
+            $pres = $pstmt->get_result();
+            if ($pres && $pres->num_rows === 1) {
+                $unit_price = floatval($pres->fetch_assoc()['price']);
+            }
+        }
+
+        if ($unit_price === null) {
             continue;
         }
-        $new_total += floatval($b_data['price']);
+
+        $new_total += $unit_price;
         
-        // Insert back (marking as not collected by default, or you can preserve status)
-        $ins_stmt = $conn->prepare("INSERT INTO request_items (request_id, book_id, is_collected) VALUES (?, ?, 0)");
-        $ins_stmt->bind_param('ii', $request_id, $book_id);
+        $is_collected = isset($current_collected_by_book[$book_id]) ? intval($current_collected_by_book[$book_id]) : 0;
+        $ins_stmt = $conn->prepare("INSERT INTO request_items (request_id, book_id, unit_price, is_collected) VALUES (?, ?, ?, ?)");
+        $ins_stmt->bind_param('iidi', $request_id, $book_id, $unit_price, $is_collected);
         $ins_stmt->execute();
     }
     
-    $status = ($amount_paid >= $new_total) ? 'paid' : 'unpaid';
+    $credit_used = floatval($request['credit_used'] ?? 0);
+    $status = (($amount_paid + $credit_used) >= $new_total) ? 'paid' : 'unpaid';
     
     // Update the main request table
     if ($is_super_admin) {
@@ -224,6 +273,7 @@ $all_books = $conn->query("SELECT * FROM books");
     
     <div class="card">
         <form method="POST">
+            <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
             <div class="section-title">Select Books</div>
             <div class="books-list">
                 <?php while($book = $all_books->fetch_assoc()): ?>

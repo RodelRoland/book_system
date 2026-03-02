@@ -14,51 +14,60 @@ if (isset($_SESSION['admin_logged_in'])) {
 }
 
 $error = '';
+$csrf_token = csrf_get_token();
+
 if ($_SERVER['REQUEST_METHOD'] == 'POST') {
-    $username = trim($_POST['username'] ?? '');
-    $password = $_POST['password'] ?? '';
-    
-    try {
-        // Authenticate against admins table
-        $stmt = $conn->prepare("SELECT admin_id, username, password_hash, full_name, class_name, role, is_active, requires_password_reset FROM admins WHERE username = ?");
-        if ($stmt) {
-            $stmt->bind_param("s", $username);
-            $stmt->execute();
-            $result = $stmt->get_result();
-            
-            if ($result && $result->num_rows === 1) {
-                $admin = $result->fetch_assoc();
+    if (!csrf_validate($_POST['csrf_token'] ?? null)) {
+        $error = 'Invalid request. Please refresh and try again.';
+    } else {
+        $username = trim($_POST['username'] ?? '');
+        $password = $_POST['password'] ?? '';
+        
+        try {
+            // Authenticate against admins table
+            $stmt = $conn->prepare("SELECT admin_id, username, password_hash, full_name, class_name, role, is_active, requires_password_reset FROM admins WHERE username = ?");
+            if ($stmt) {
+                $stmt->bind_param("s", $username);
+                $stmt->execute();
+                $result = $stmt->get_result();
                 
-                // Check if account is active
-                if (!$admin['is_active']) {
-                    $error = "Your account has been deactivated. Contact the administrator.";
-                } elseif (intval($admin['requires_password_reset'] ?? 0) === 1 && ($admin['role'] ?? '') === 'rep') {
-                    header('Location: rep_first_time_reset.php');
-                    exit;
-                } elseif (password_verify($password, $admin['password_hash'])) {
-                    $_SESSION['admin_logged_in'] = true;
-                    $_SESSION['admin_id'] = $admin['admin_id'];
-                    $_SESSION['admin_username'] = $admin['username'];
-                    $_SESSION['admin_full_name'] = $admin['full_name'];
-                    $_SESSION['admin_class_name'] = $admin['class_name'];
-                    $_SESSION['admin_role'] = $admin['role'];
-                    if ($admin['role'] === 'super_admin') {
-                        header('Location: admin.php');
+                if ($result && $result->num_rows === 1) {
+                    $admin = $result->fetch_assoc();
+                    
+                    // Check if account is active
+                    if (!$admin['is_active']) {
+                        $error = "Your account has been deactivated. Contact the administrator.";
+                    } elseif (password_verify($password, $admin['password_hash'])) {
+                        // Check password reset requirement AFTER verifying password
+                        if (intval($admin['requires_password_reset'] ?? 0) === 1 && ($admin['role'] ?? '') === 'rep') {
+                            $_SESSION['reset_admin_id'] = $admin['admin_id'];
+                            header('Location: rep_first_time_reset.php');
+                            exit;
+                        }
+                        $_SESSION['admin_logged_in'] = true;
+                        $_SESSION['admin_id'] = $admin['admin_id'];
+                        $_SESSION['admin_username'] = $admin['username'];
+                        $_SESSION['admin_full_name'] = $admin['full_name'];
+                        $_SESSION['admin_class_name'] = $admin['class_name'];
+                        $_SESSION['admin_role'] = $admin['role'];
+                        if ($admin['role'] === 'super_admin') {
+                            header('Location: admin.php');
+                        } else {
+                            header('Location: rep_dashboard.php');
+                        }
+                        exit;
                     } else {
-                        header('Location: rep_dashboard.php');
+                        $error = "Invalid username or password.";
                     }
-                    exit;
                 } else {
                     $error = "Invalid username or password.";
                 }
             } else {
-                $error = "Invalid username or password.";
+                $error = "Database error. Please try again.";
             }
-        } else {
-            $error = "Database error. Please try again.";
+        } catch (Exception $e) {
+            $error = "System error. Please try again.";
         }
-    } catch (Exception $e) {
-        $error = "System error. Please try again.";
     }
 }
 ?>
@@ -193,6 +202,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
         <?php endif; ?>
 
         <form method="POST" autocomplete="off">
+            <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
             <div class="form-group">
                 <label>Username</label>
                 <input type="text" name="username" placeholder="Enter your username" required autofocus autocomplete="username">
@@ -211,6 +221,8 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
                 <a href="rep_signup.php" style="color:#667eea; text-decoration:none; font-weight:600;">Rep Sign Up</a>
                 <span style="color:#ccc; padding: 0 8px;">|</span>
                 <a href="rep_first_time_reset.php" style="color:#667eea; text-decoration:none; font-weight:600;">First-Time Code Reset</a>
+                <span style="color:#ccc; padding: 0 8px;">|</span>
+                <a href="lecturer_login.php" style="color:#667eea; text-decoration:none; font-weight:600;">Lecturer Login</a>
             </div>
         </div>
     </div>

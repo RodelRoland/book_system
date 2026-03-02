@@ -13,7 +13,7 @@ $current_admin_role = $_SESSION['admin_role'] ?? 'rep';
 $is_super_admin = ($current_admin_role === 'super_admin');
 
 // Capture the search term from the URL
-$search = isset($_GET['search']) ? $conn->real_escape_string($_GET['search']) : '';
+$search = isset($_GET['search']) ? trim($_GET['search']) : '';
 
 $semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
 
@@ -35,30 +35,56 @@ header('Content-Disposition: attachment; filename=filtered_book_requests.csv');
 $output = fopen('php://output', 'w');
 
 /* CSV column headers */
-fputcsv($output, ['Index Number', 'Student Name', 'Phone', 'Book Title', 'Payment Status', 'Collection Status', 'Request Date']);
+fputcsv($output, ['Index Number', 'Student Name', 'Phone', 'Book Title', 'Payment Status', 'Collection Status', 'Date']);
 
-/* Fetch data - Modified to include filtering */
+/* Fetch data - Prepared for safety */
 $sql = "SELECT 
             s.index_number, s.full_name, s.phone, b.book_title, 
-            r.payment_status, ri.is_collected, r.created_at
+            r.payment_status, ri.is_collected, 
+            COALESCE(ri.received_at, r.created_at) as display_date,
+            r.created_at as request_date,
+            ri.received_at as received_date
         FROM requests r
         JOIN students s ON r.student_id = s.student_id
         JOIN request_items ri ON r.request_id = ri.request_id
         JOIN books b ON ri.book_id = b.book_id
-        WHERE r.semester_id = $semester_id
-          " . ($is_super_admin ? "" : " AND r.admin_id = $current_admin_id ") . "
-          $collection_where
-          AND (
-               s.full_name LIKE '%$search%' 
-           OR s.index_number LIKE '%$search%' 
-           OR b.book_title LIKE '%$search%'
-          )
-        ORDER BY r.created_at DESC";
+        WHERE r.semester_id = ?
+          " . ($is_super_admin ? "" : " AND r.admin_id = ? ") . "
+          $collection_where";
 
-$result = $conn->query($sql);
+if ($search !== '') {
+    $sql .= " AND (
+               s.full_name LIKE ?
+           OR s.index_number LIKE ?
+           OR b.book_title LIKE ?
+          )";
+}
+
+$sql .= " ORDER BY display_date DESC";
+
+$stmt = $conn->prepare($sql);
+$result = null;
+if ($stmt) {
+    $search_pattern = '%' . $search . '%';
+    if ($is_super_admin) {
+        if ($search !== '') {
+            $stmt->bind_param('isss', $semester_id, $search_pattern, $search_pattern, $search_pattern);
+        } else {
+            $stmt->bind_param('i', $semester_id);
+        }
+    } else {
+        if ($search !== '') {
+            $stmt->bind_param('iisss', $semester_id, $current_admin_id, $search_pattern, $search_pattern, $search_pattern);
+        } else {
+            $stmt->bind_param('ii', $semester_id, $current_admin_id);
+        }
+    }
+    $stmt->execute();
+    $result = $stmt->get_result();
+}
 
 /* Write rows */
-while ($row = $result->fetch_assoc()) {
+while ($result && ($row = $result->fetch_assoc())) {
     $status = ($row['is_collected'] == 1) ? 'COLLECTED' : 'PENDING';
     fputcsv($output, [
         $row['index_number'],
@@ -67,7 +93,7 @@ while ($row = $result->fetch_assoc()) {
         $row['book_title'],
         strtoupper($row['payment_status']),
         $status,
-        $row['created_at']
+        $row['display_date']
     ]);
 }
 

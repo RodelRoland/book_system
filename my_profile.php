@@ -11,8 +11,13 @@ $admin_id = intval($_SESSION['admin_id']);
 $success_msg = '';
 $error_msg = '';
 
+$csrf_token = csrf_get_token();
+
 // Handle form submission
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!csrf_validate($_POST['csrf_token'] ?? null)) {
+        $error_msg = 'Invalid request. Please refresh and try again.';
+    } else {
     $full_name = trim($_POST['full_name'] ?? '');
     $class_name = trim($_POST['class_name'] ?? '');
     $momo_number = trim($_POST['momo_number'] ?? '');
@@ -32,6 +37,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             $error_msg = "Failed to update profile.";
         }
+    }
     }
 }
 
@@ -205,6 +211,7 @@ if (!$admin) {
         </div>
         
         <form method="POST">
+            <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
             <p class="section-title">👤 Personal Details</p>
             
             <div class="form-row">

@@ -16,6 +16,10 @@ if (($_SESSION['admin_role'] ?? '') === 'super_admin') {
 
 // Handle Logout
 if (isset($_GET['logout'])) {
+    if (!csrf_validate($_GET['csrf_token'] ?? null)) {
+        header('Location: rep_dashboard.php?msg=csrf_invalid');
+        exit;
+    }
     session_destroy();
     header("Location: login.php");
     exit;
@@ -29,30 +33,58 @@ $current_admin_name = $_SESSION['admin_full_name'] ?? $_SESSION['admin_username'
 // Fetch rep's stats
 $semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
 
-$rev_q = "SELECT SUM(total_amount) AS total FROM requests WHERE payment_status = 'paid' AND semester_id = $semester_id AND admin_id = $current_admin_id";
-$rev_res = $conn->query($rev_q);
-$rev_data = $rev_res->fetch_assoc();
-$total_collected = $rev_data['total'] ?? 0;
+$total_collected = 0;
+$paid_to_lecturers = 0;
+$total_pending = 0;
 
-$lec_q = "SELECT SUM(amount_paid) AS total FROM lecturer_payments WHERE semester_id = $semester_id AND admin_id = $current_admin_id";
-$lec_res = $conn->query($lec_q);
-$lec_data = $lec_res->fetch_assoc();
-$paid_to_lecturers = $lec_data['total'] ?? 0;
+$stmt = $conn->prepare("SELECT COALESCE(SUM(total_amount), 0) AS total FROM requests WHERE payment_status = 'paid' AND semester_id = ? AND admin_id = ?");
+if ($stmt) {
+    $stmt->bind_param('ii', $semester_id, $current_admin_id);
+    $stmt->execute();
+    $rev_res = $stmt->get_result();
+    if ($rev_res && $rev_res->num_rows === 1) {
+        $total_collected = floatval($rev_res->fetch_assoc()['total'] ?? 0);
+    }
+}
+
+$stmt = $conn->prepare("SELECT COALESCE(SUM(amount_paid), 0) AS total FROM lecturer_payments WHERE semester_id = ? AND admin_id = ?");
+if ($stmt) {
+    $stmt->bind_param('ii', $semester_id, $current_admin_id);
+    $stmt->execute();
+    $lec_res = $stmt->get_result();
+    if ($lec_res && $lec_res->num_rows === 1) {
+        $paid_to_lecturers = floatval($lec_res->fetch_assoc()['total'] ?? 0);
+    }
+}
 
 $net_balance = $total_collected - $paid_to_lecturers;
 
-$pen_q = "SELECT COUNT(*) AS count FROM requests WHERE payment_status = 'unpaid' AND semester_id = $semester_id AND admin_id = $current_admin_id";
-$pen_res = $conn->query($pen_q);
-$pen_data = $pen_res->fetch_assoc();
-$total_pending = $pen_data['count'] ?? 0;
+$stmt = $conn->prepare("SELECT COUNT(*) AS count FROM requests WHERE payment_status = 'unpaid' AND semester_id = ? AND admin_id = ?");
+if ($stmt) {
+    $stmt->bind_param('ii', $semester_id, $current_admin_id);
+    $stmt->execute();
+    $pen_res = $stmt->get_result();
+    if ($pen_res && $pen_res->num_rows === 1) {
+        $total_pending = intval($pen_res->fetch_assoc()['count'] ?? 0);
+    }
+}
 
 // Get active semester name
-$sem_res = $conn->query("SELECT semester_name FROM semesters WHERE is_active = 1 LIMIT 1");
-$active_semester_name = ($sem_res && $sem_res->num_rows > 0) ? $sem_res->fetch_assoc()['semester_name'] : '';
+$active_semester_name = '';
+$stmt = $conn->prepare("SELECT semester_name FROM semesters WHERE is_active = 1 ORDER BY semester_id DESC LIMIT 1");
+if ($stmt) {
+    $stmt->execute();
+    $sem_res = $stmt->get_result();
+    if ($sem_res && $sem_res->num_rows > 0) {
+        $active_semester_name = strval($sem_res->fetch_assoc()['semester_name'] ?? '');
+    }
+}
 
 // Get rep's unique order link
 $rep_username = $_SESSION['admin_username'] ?? '';
 $order_link = "index.php?rep=" . urlencode($rep_username);
+
+$csrf_token = csrf_get_token();
 ?>
 
 <!DOCTYPE html>
@@ -244,7 +276,7 @@ $order_link = "index.php?rep=" . urlencode($rep_username);
                 <code id="orderLink"><?php echo htmlspecialchars($order_link); ?></code>
                 <button class="copy-btn" onclick="copyLink()">Copy</button>
             </div>
-            <a href="?logout=1" class="logout-btn">Logout</a>
+            <a href="?logout=1&csrf_token=<?php echo urlencode($csrf_token); ?>" class="logout-btn">Logout</a>
         </div>
     </div>
     

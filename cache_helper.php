@@ -26,7 +26,7 @@ function init_redis() {
     if (class_exists('Redis')) {
         try {
             $redis = new Redis();
-            $connected = @$redis->connect(REDIS_HOST, REDIS_PORT, 2.0); // 2 second timeout
+            $connected = @$redis->connect(REDIS_HOST, REDIS_PORT, 0.2);
             if ($connected) {
                 $redis->setOption(Redis::OPT_SERIALIZER, Redis::SERIALIZER_PHP);
                 $GLOBALS['redis_connection'] = $redis;
@@ -175,16 +175,23 @@ function ensure_db_indexes($conn) {
     if ($indexes_checked) return;
     
     $indexes = [
-        "CREATE INDEX IF NOT EXISTS idx_requests_semester ON requests(semester_id)",
-        "CREATE INDEX IF NOT EXISTS idx_requests_admin ON requests(admin_id)",
-        "CREATE INDEX IF NOT EXISTS idx_requests_student ON requests(student_id)",
-        "CREATE INDEX IF NOT EXISTS idx_requests_created ON requests(created_at)",
-        "CREATE INDEX IF NOT EXISTS idx_students_index ON students(index_number)",
-        "CREATE INDEX IF NOT EXISTS idx_students_admin ON students(admin_id)",
-        "CREATE INDEX IF NOT EXISTS idx_request_items_request ON request_items(request_id)",
-        "CREATE INDEX IF NOT EXISTS idx_request_items_book ON request_items(book_id)",
-        "CREATE INDEX IF NOT EXISTS idx_class_students_admin ON class_students(admin_id)",
-        "CREATE INDEX IF NOT EXISTS idx_class_students_index ON class_students(index_number)"
+        "CREATE INDEX idx_requests_semester ON requests(semester_id)",
+        "CREATE INDEX idx_requests_admin ON requests(admin_id)",
+        "CREATE INDEX idx_requests_student ON requests(student_id)",
+        "CREATE INDEX idx_requests_created ON requests(created_at)",
+        "CREATE INDEX idx_requests_sem_admin_created ON requests(semester_id, admin_id, created_at)",
+        "CREATE INDEX idx_requests_student_sem ON requests(student_id, semester_id)",
+        "CREATE INDEX idx_students_index ON students(index_number)",
+        "CREATE INDEX idx_students_admin ON students(admin_id)",
+        "CREATE INDEX idx_students_admin_index ON students(admin_id, index_number)",
+        "CREATE INDEX idx_request_items_request ON request_items(request_id)",
+        "CREATE INDEX idx_request_items_book ON request_items(book_id)",
+        "CREATE INDEX idx_request_items_book_collected ON request_items(book_id, is_collected)",
+        "CREATE INDEX idx_request_items_request_collected ON request_items(request_id, is_collected)",
+        "CREATE INDEX idx_lecturer_payments_sem_admin_book ON lecturer_payments(semester_id, admin_id, book_id)",
+        "CREATE INDEX idx_books_received_sem_admin_book ON books_received(semester_id, admin_id, book_id)",
+        "CREATE INDEX idx_class_students_admin ON class_students(admin_id)",
+        "CREATE INDEX idx_class_students_index ON class_students(index_number)"
     ];
     
     foreach ($indexes as $sql) {

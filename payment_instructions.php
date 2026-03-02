@@ -1,6 +1,6 @@
 <?php
 error_reporting(E_ALL);
-ini_set('display_errors', 1);
+ini_set('display_errors', 0); // Disable display_errors for production readiness
 
 include 'db.php';
 
@@ -10,13 +10,17 @@ if (!isset($_GET['request_id'])) {
 
 $request_id = intval($_GET['request_id']);
 
-$query = $conn->query("
-    SELECT r.total_amount, r.amount_paid, r.payment_status, r.admin_id,
+$stmt = $conn->prepare("SELECT r.total_amount, r.amount_paid, r.credit_used, r.payment_status, r.admin_id,
            s.index_number, s.full_name, s.credit_balance
     FROM requests r
     JOIN students s ON r.student_id = s.student_id
-    WHERE r.request_id = $request_id
-");
+    WHERE r.request_id = ?");
+$query = null;
+if ($stmt) {
+    $stmt->bind_param('i', $request_id);
+    $stmt->execute();
+    $query = $stmt->get_result();
+}
 
 if (!$query || $query->num_rows === 0) {
     die("Payment record not found.");
@@ -29,17 +33,26 @@ $rep_admin_id = intval($data['admin_id'] ?? 0);
 $rep_info = null;
 
 if ($rep_admin_id > 0) {
-    $rep_query = $conn->query("SELECT full_name, momo_number, account_name, account_number, bank_name FROM admins WHERE admin_id = $rep_admin_id");
-    if ($rep_query && $rep_query->num_rows > 0) {
-        $rep_info = $rep_query->fetch_assoc();
+    $rep_stmt = $conn->prepare("SELECT full_name, momo_number, account_name, account_number, bank_name FROM admins WHERE admin_id = ? LIMIT 1");
+    if ($rep_stmt) {
+        $rep_stmt->bind_param('i', $rep_admin_id);
+        $rep_stmt->execute();
+        $rep_query = $rep_stmt->get_result();
+        if ($rep_query && $rep_query->num_rows > 0) {
+            $rep_info = $rep_query->fetch_assoc();
+        }
     }
 }
 
 // Fallback to super admin if no rep info
 if (!$rep_info || empty($rep_info['momo_number'])) {
-    $fallback = $conn->query("SELECT full_name, momo_number, account_name, account_number, bank_name FROM admins WHERE role = 'super_admin' AND is_active = 1 LIMIT 1");
-    if ($fallback && $fallback->num_rows > 0) {
-        $rep_info = $fallback->fetch_assoc();
+    $fallback_stmt = $conn->prepare("SELECT full_name, momo_number, account_name, account_number, bank_name FROM admins WHERE role = 'super_admin' AND is_active = 1 ORDER BY admin_id ASC LIMIT 1");
+    if ($fallback_stmt) {
+        $fallback_stmt->execute();
+        $fallback = $fallback_stmt->get_result();
+        if ($fallback && $fallback->num_rows > 0) {
+            $rep_info = $fallback->fetch_assoc();
+        }
     }
 }
 
@@ -51,7 +64,7 @@ $account_number = $rep_info['account_number'] ?? '';
 $bank_name = $rep_info['bank_name'] ?? '';
 
 $subtotal      = (float) $data['total_amount'];
-$credit_used   = (float) $data['amount_paid'];
+$credit_used   = (float) ($data['credit_used'] ?? 0);
 $remaining     = $subtotal - $credit_used;
 $momo_charge   = $remaining * 0.01;
 $final_amount  = $remaining + $momo_charge;

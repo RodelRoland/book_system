@@ -6,11 +6,18 @@ include 'db.php';
 $rep_id = 0;
 $rep_info = null;
 if (isset($_GET['rep'])) {
-    $rep_username = $conn->real_escape_string($_GET['rep']);
-    $rep_query = $conn->query("SELECT admin_id, full_name, class_name FROM admins WHERE username = '$rep_username' AND is_active = 1");
-    if ($rep_query && $rep_query->num_rows > 0) {
-        $rep_info = $rep_query->fetch_assoc();
-        $rep_id = intval($rep_info['admin_id']);
+    $rep_username = substr(trim(strval($_GET['rep'] ?? '')), 0, 50);
+    if ($rep_username !== '') {
+        $rep_stmt = $conn->prepare("SELECT admin_id, full_name, class_name FROM admins WHERE username = ? AND is_active = 1 LIMIT 1");
+        if ($rep_stmt) {
+            $rep_stmt->bind_param('s', $rep_username);
+            $rep_stmt->execute();
+            $rep_query = $rep_stmt->get_result();
+            if ($rep_query && $rep_query->num_rows > 0) {
+                $rep_info = $rep_query->fetch_assoc();
+                $rep_id = intval($rep_info['admin_id']);
+            }
+        }
     }
 }
 
@@ -34,6 +41,8 @@ if (empty($books_array)) {
         }
     }
 }
+
+$csrf_token = csrf_get_token();
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -50,6 +59,7 @@ if (empty($books_array)) {
     <h2>Course Material Request</h2>
 
     <form method="post" action="submit_request.php" id="requestForm">
+        <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
 
         <!-- ── STEP 1 ── Personal Information ─────────────────────────────── -->
         <div id="step1" class="form-step active">
@@ -306,15 +316,13 @@ if (empty($books_array)) {
 function checkOwnedBooks(indexNumber) {
     if (indexNumber.length < 3) return;
      
-    fetch('check_student_books.php?index=' + indexNumber)
+    fetch('check_student_books.php?index=' + encodeURIComponent(indexNumber) + '&rep_id=' + <?php echo intval($rep_id); ?>)
         .then(response => response.json())
         .then(ownedBooks => {
             // Re-enable all first to reset the form
-            document.querySelectorAll('input[name="books[]"]').forEach(checkbox => {
-                checkbox.disabled = false;
-                checkbox.parentElement.style.opacity = "1";
-                checkbox.parentElement.style.textDecoration = "";
-                checkbox.parentElement.title = "";
+            document.querySelectorAll('.book-check').forEach(cb => {
+                cb.disabled = false;
+                cb.parentElement.classList.remove('book-owned');
             });
             
             // Disable books the student already owns

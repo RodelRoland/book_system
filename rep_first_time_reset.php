@@ -5,7 +5,12 @@ require_once 'db.php';
 $success_msg = '';
 $error_msg = '';
 
+$csrf_token = csrf_get_token();
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!csrf_validate($_POST['csrf_token'] ?? null)) {
+        $error_msg = 'Invalid request. Please refresh and try again.';
+    } else {
     $username = trim($_POST['username'] ?? '');
     $code = trim($_POST['code'] ?? '');
     $new_password = $_POST['new_password'] ?? '';
@@ -42,6 +47,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             $error_msg = 'Invalid details. Make sure your username and code are correct.';
         }
+    }
     }
 }
 ?>
@@ -143,6 +149,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     <div class="card">
         <form method="post" autocomplete="off">
+            <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
             <div class="form-group">
                 <label>Username *</label>
                 <input type="text" name="username" required>

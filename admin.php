@@ -274,22 +274,24 @@ $is_super_admin = ($current_admin_role === 'super_admin');
         
         $rev_q = "SELECT SUM(total_amount) AS total FROM requests WHERE payment_status = 'paid' AND semester_id = $semester_id $admin_filter";
         $rev_res = $conn->query($rev_q);
-        $rev_data = $rev_res->fetch_assoc();
+        $rev_data = $rev_res ? $rev_res->fetch_assoc() : [];
         $total_collected = $rev_data['total'] ?? 0;
 
         // Fetch Total Paid to Lecturers
         $lec_q = "SELECT SUM(amount_paid) AS total FROM lecturer_payments WHERE semester_id = $semester_id $admin_filter";
         $lec_res = $conn->query($lec_q);
-        $lec_data = $lec_res->fetch_assoc();
+        $lec_data = $lec_res ? $lec_res->fetch_assoc() : [];
         $paid_to_lecturers = $lec_data['total'] ?? 0;
         
         // Net Balance
         $net_balance = $total_collected - $paid_to_lecturers;
+        $is_overpaid = floatval($net_balance) < 0;
+        $display_balance = $is_overpaid ? abs(floatval($net_balance)) : floatval($net_balance);
 
         // Fetch Pending Count
         $pen_q = "SELECT COUNT(*) AS count FROM requests WHERE payment_status = 'unpaid' AND semester_id = $semester_id $admin_filter";
         $pen_res = $conn->query($pen_q);
-        $pen_data = $pen_res->fetch_assoc();
+        $pen_data = $pen_res ? $pen_res->fetch_assoc() : [];
         $total_pending = $pen_data['count'] ?? 0;
 
         $semesters_result = $conn->query("SELECT semester_id, semester_name, is_active FROM semesters ORDER BY semester_id DESC");
@@ -343,7 +345,7 @@ $is_super_admin = ($current_admin_role === 'super_admin');
                 <div class="value">GH₵ <?php echo number_format($paid_to_lecturers, 2); ?></div>
             </div>
             <div class="stat-card yellow">
-                <div class="label">Your Balance</div>
+                <div class="label">Remaining Balance</div>
                 <div class="value">GH₵ <?php echo number_format($net_balance, 2); ?></div>
             </div>
             <div class="stat-card red">

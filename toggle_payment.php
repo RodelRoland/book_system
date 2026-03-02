@@ -11,6 +11,10 @@ $current_admin_role = $_SESSION['admin_role'] ?? 'rep';
 $is_super_admin = ($current_admin_role === 'super_admin');
 
 if (isset($_GET['request_id'])) {
+    if (!csrf_validate($_GET['csrf_token'] ?? null)) {
+        header("Location: view_request.php?msg=csrf_invalid");
+        exit;
+    }
     $request_id = intval($_GET['request_id']);
 
     if ($request_id <= 0) {
@@ -37,21 +41,21 @@ if (isset($_GET['request_id'])) {
         
         // 3. Update the database - also update amount_paid when marking as paid
         if ($new_status === 'paid') {
-            // When marking as paid, set amount_paid = total_amount so balance shows correctly
+            // When marking as paid, set amount_paid to remaining due (total_amount - credit_used)
             if ($is_super_admin) {
-                $upd = $conn->prepare("UPDATE requests SET payment_status = ?, amount_paid = total_amount WHERE request_id = ?");
+                $upd = $conn->prepare("UPDATE requests SET payment_status = ?, amount_paid = GREATEST(0, total_amount - credit_used) WHERE request_id = ?");
                 $upd->bind_param('si', $new_status, $request_id);
             } else {
-                $upd = $conn->prepare("UPDATE requests SET payment_status = ?, amount_paid = total_amount WHERE request_id = ? AND admin_id = ?");
+                $upd = $conn->prepare("UPDATE requests SET payment_status = ?, amount_paid = GREATEST(0, total_amount - credit_used) WHERE request_id = ? AND admin_id = ?");
                 $upd->bind_param('sii', $new_status, $request_id, $current_admin_id);
             }
         } else {
-            // When marking as unpaid, just change status
+            // When marking as unpaid, reset amount_paid to 0 for consistency
             if ($is_super_admin) {
-                $upd = $conn->prepare("UPDATE requests SET payment_status = ? WHERE request_id = ?");
+                $upd = $conn->prepare("UPDATE requests SET payment_status = ?, amount_paid = 0 WHERE request_id = ?");
                 $upd->bind_param('si', $new_status, $request_id);
             } else {
-                $upd = $conn->prepare("UPDATE requests SET payment_status = ? WHERE request_id = ? AND admin_id = ?");
+                $upd = $conn->prepare("UPDATE requests SET payment_status = ?, amount_paid = 0 WHERE request_id = ? AND admin_id = ?");
                 $upd->bind_param('sii', $new_status, $request_id, $current_admin_id);
             }
         }
