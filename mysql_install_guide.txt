@@ -1,0 +1,68 @@
+MySQL 8.0 Installation Guide
+============================
+
+STEP 1: DOWNLOAD
+-------------
+Go to: https://dev.mysql.com/downloads/mysql/
+Click: "MySQL Community Server 8.0.40" (or latest version)
+Select: "Windows (x86, 64-bit), ZIP Archive"
+Download to: C:\Downloads\mysql-8.0.40-winx64.zip
+
+STEP 2: EXTRACT
+------------
+Extract to: C:\mysql8\
+(You should have C:\mysql8\bin\mysqld.exe)
+
+STEP 3: CREATE CONFIG
+------------------
+Create file: C:\mysql8\my.ini
+Content:
+[mysqld]
+port=3307
+basedir=C:/mysql8
+datadir=C:/mysql8/data
+socket=C:/mysql8/mysql.sock
+default-character-set=utf8mb4
+character-set-server=utf8mb4
+collation-server=utf8mb4_unicode_ci
+
+[client]
+port=3307
+socket=C:/mysql8/mysql.sock
+
+STEP 4: INITIALIZE
+----------------
+Open Command Prompt as Administrator:
+cd C:\mysql8\bin
+mysqld.exe --initialize --console
+(Note the temporary root password shown)
+
+STEP 5: INSTALL SERVICE
+---------------------
+mysqld.exe --install MySQL8 --defaults-file=C:\mysql8\my.ini
+
+STEP 6: START SERVICE
+-------------------
+net start MySQL8
+
+STEP 7: SET ROOT PASSWORD
+-----------------------
+mysql -u root -p -P 3307
+(Enter temporary password from step 4)
+ALTER USER 'root'@'localhost' IDENTIFIED BY 'your_new_password';
+FLUSH PRIVILEGES;
+EXIT;
+
+STEP 8: TEST CONNECTION
+----------------------
+mysql -u root -p -P 3307
+(Should connect successfully)
+
+STEP 9: CREATE DATABASE
+----------------------
+CREATE DATABASE book_distribution_system;
+SHOW DATABASES;
+
+STEP 10: UPDATE PHP CONNECTION
+------------------------------
+Update db.php to use port 3307 for MySQL 8.0

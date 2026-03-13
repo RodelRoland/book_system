@@ -13,6 +13,11 @@ $is_super_admin = ($current_admin_role === 'super_admin');
 
 $csrf_token = csrf_get_token();
 
+// Check database connection
+if (!$conn) {
+    die("Database connection failed. Please check your database settings.");
+}
+
 // Fetch available books
 $books_res = $conn->query("SELECT * FROM books WHERE availability = 'available'");
 
@@ -107,38 +112,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (!isset($error) && $student_id > 0) {
                     $total_amount = 0.0;
                     $book_prices = [];
-                    $price_date = date('Y-m-d');
                     foreach ($selected_books as $book_id) {
                         $book_id = intval($book_id);
                         if ($book_id <= 0) {
                             continue;
                         }
 
+                        // Simplified price lookup to prevent MySQL crashes
+                        $pstmt = $conn->prepare("SELECT price FROM books WHERE book_id = ? LIMIT 1");
                         $unit_price = null;
-                        $hpstmt = $conn->prepare("SELECT new_price FROM book_price_history WHERE book_id = ? AND effective_date IS NOT NULL AND effective_date <= ? ORDER BY effective_date DESC, history_id DESC LIMIT 1");
-                        if ($hpstmt) {
-                            $hpstmt->bind_param('is', $book_id, $price_date);
-                            $hpstmt->execute();
-                            $hpres = $hpstmt->get_result();
-                            if ($hpres && $hpres->num_rows === 1) {
-                                $unit_price = floatval($hpres->fetch_assoc()['new_price']);
-                            }
-                        }
-
-                        if ($unit_price === null) {
-                            $hnstmt = $conn->prepare("SELECT old_price FROM book_price_history WHERE book_id = ? AND effective_date IS NOT NULL AND effective_date > ? ORDER BY effective_date ASC, history_id ASC LIMIT 1");
-                            if ($hnstmt) {
-                                $hnstmt->bind_param('is', $book_id, $price_date);
-                                $hnstmt->execute();
-                                $hnres = $hnstmt->get_result();
-                                if ($hnres && $hnres->num_rows === 1) {
-                                    $unit_price = floatval($hnres->fetch_assoc()['old_price']);
-                                }
-                            }
-                        }
-
-                        if ($unit_price === null) {
-                            $pstmt = $conn->prepare("SELECT price FROM books WHERE book_id = ? LIMIT 1");
+                        if ($pstmt) {
                             $pstmt->bind_param('i', $book_id);
                             $pstmt->execute();
                             $pres = $pstmt->get_result();
