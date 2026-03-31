@@ -6,7 +6,7 @@ require_once 'db.php';
 // Redirect if already logged in
 if (isset($_SESSION['admin_logged_in'])) {
     if (($_SESSION['admin_role'] ?? '') === 'super_admin') {
-        header('Location: admin.php');
+        header('Location: super_admin_home.php');
     } else {
         header('Location: rep_dashboard.php');
     }
@@ -51,7 +51,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
                         $_SESSION['admin_class_name'] = $admin['class_name'];
                         $_SESSION['admin_role'] = $admin['role'];
                         if ($admin['role'] === 'super_admin') {
-                            header('Location: admin.php');
+                            header('Location: super_admin_home.php');
                         } else {
                             header('Location: rep_dashboard.php');
                         }

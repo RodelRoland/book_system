@@ -10,12 +10,12 @@ $current_admin_id = intval($_SESSION['admin_id'] ?? 0);
 $current_admin_role = $_SESSION['admin_role'] ?? 'rep';
 $is_super_admin = ($current_admin_role === 'super_admin');
 
-if (isset($_GET['id'])) {
-    if (!csrf_validate($_GET['csrf_token'] ?? null)) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['id'])) {
+    if (!csrf_validate($_POST['csrf_token'] ?? null)) {
         header("Location: view_request.php?msg=csrf_invalid");
         exit;
     }
-    $request_id = intval($_GET['id']);
+    $request_id = intval($_POST['id'] ?? 0);
     if ($request_id <= 0) {
         header("Location: view_request.php?msg=invalid_request");
         exit;
@@ -79,6 +79,12 @@ if (isset($_GET['id'])) {
         }
 
         $conn->commit();
+        if (function_exists('book_system_audit_log')) {
+            book_system_audit_log($conn, 'delete_request', 'request', $request_id, [
+                'student_id' => $del_student_id,
+                'credit_restored' => $credit_to_restore,
+            ]);
+        }
     } catch (Throwable $e) {
         $conn->rollback();
         header("Location: view_request.php?msg=delete_failed");

@@ -1,35 +1,65 @@
-<?php
+﻿<?php
 session_start();
 require_once 'db.php';
 
 $semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
 
 // 1. Handle Logout
-if (isset($_GET['logout'])) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['logout'])) {
+    if (!csrf_validate($_POST['csrf_token'] ?? null)) {
+        header("Location: admin.php?msg=csrf_invalid");
+        exit;
+    }
     session_destroy();
-    header("Location: admin.php");
+    header("Location: login.php");
     exit;
 }
 
-if (isset($_SESSION['admin_logged_in']) && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['set_active_semester'])) {
+if (
+    isset($_SESSION['admin_logged_in']) &&
+    ($_SESSION['admin_role'] ?? '') === 'super_admin' &&
+    $_SERVER['REQUEST_METHOD'] === 'POST' &&
+    isset($_POST['set_active_semester'])
+) {
+    if (!csrf_validate($_POST['csrf_token'] ?? null)) {
+        header("Location: admin.php?msg=csrf_invalid");
+        exit;
+    }
     $new_id = intval($_POST['semester_id']);
     if ($new_id > 0) {
         $conn->query("UPDATE semesters SET is_active = 0");
         $stmt = $conn->prepare("UPDATE semesters SET is_active = 1 WHERE semester_id = ?");
         $stmt->bind_param("i", $new_id);
         $stmt->execute();
+        if (function_exists('book_system_audit_log')) {
+            book_system_audit_log($conn, 'set_active_semester', 'semester', $new_id, []);
+        }
     }
     header("Location: admin.php");
     exit;
 }
 
-if (isset($_SESSION['admin_logged_in']) && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['create_semester'])) {
+if (
+    isset($_SESSION['admin_logged_in']) &&
+    ($_SESSION['admin_role'] ?? '') === 'super_admin' &&
+    $_SERVER['REQUEST_METHOD'] === 'POST' &&
+    isset($_POST['create_semester'])
+) {
+    if (!csrf_validate($_POST['csrf_token'] ?? null)) {
+        header("Location: admin.php?msg=csrf_invalid");
+        exit;
+    }
     $name = trim($_POST['semester_name'] ?? '');
     if ($name !== '') {
         $conn->query("UPDATE semesters SET is_active = 0");
         $stmt = $conn->prepare("INSERT INTO semesters (semester_name, is_active) VALUES (?, 1) ON DUPLICATE KEY UPDATE is_active = 1");
         $stmt->bind_param("s", $name);
         $stmt->execute();
+        if (function_exists('book_system_audit_log')) {
+            book_system_audit_log($conn, 'create_semester', 'semester', intval($conn->insert_id), [
+                'semester_name' => $name,
+            ]);
+        }
     }
     header("Location: admin.php");
     exit;
@@ -46,6 +76,20 @@ $current_admin_id = intval($_SESSION['admin_id'] ?? 0);
 $current_admin_role = $_SESSION['admin_role'] ?? 'rep';
 $current_admin_class = $_SESSION['admin_class_name'] ?? '';
 $is_super_admin = ($current_admin_role === 'super_admin');
+$csrf_token = csrf_get_token();
+$metrics_admin_id = $is_super_admin ? null : $current_admin_id;
+$dashboard_metrics = function_exists('book_system_get_dashboard_metrics')
+    ? book_system_get_dashboard_metrics($conn, $semester_id, $metrics_admin_id)
+    : [];
+$dashboard_alerts = function_exists('book_system_get_dashboard_alerts')
+    ? book_system_get_dashboard_alerts($conn, $semester_id, $metrics_admin_id)
+    : [];
+$semester_chart_rows = function_exists('book_system_get_semester_chart_data')
+    ? book_system_get_semester_chart_data($conn, 6, $metrics_admin_id)
+    : [];
+$recent_activity = function_exists('book_system_fetch_recent_activity')
+    ? book_system_fetch_recent_activity($conn, 8, $current_admin_id, $is_super_admin)
+    : [];
 
 ?>
 
@@ -150,6 +194,113 @@ $is_super_admin = ($current_admin_role === 'super_admin');
             padding: 30px;
             box-shadow: 0 4px 15px rgba(0,0,0,0.08);
         }
+        .overview-grid {
+            display: grid;
+            grid-template-columns: 1.4fr 1fr;
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        .panel {
+            background: white;
+            border-radius: 16px;
+            padding: 24px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+        }
+        .panel h2 {
+            font-size: 18px;
+            color: #333;
+            margin-bottom: 18px;
+        }
+        .panel-wide {
+            grid-column: 1 / -1;
+        }
+        .chart-group {
+            margin-bottom: 18px;
+        }
+        .chart-group:last-child {
+            margin-bottom: 0;
+        }
+        .chart-label {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 8px;
+            font-size: 13px;
+            color: #555;
+            font-weight: 600;
+        }
+        .chart-track {
+            height: 10px;
+            background: #edf2f7;
+            border-radius: 999px;
+            overflow: hidden;
+        }
+        .chart-fill {
+            height: 100%;
+            border-radius: 999px;
+        }
+        .chart-fill.revenue { background: linear-gradient(135deg, #34d399 0%, #059669 100%); }
+        .chart-fill.unpaid { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); }
+        .chart-fill.collected { background: linear-gradient(135deg, #60a5fa 0%, #2563eb 100%); }
+        .chart-fill.pending { background: linear-gradient(135deg, #f87171 0%, #dc2626 100%); }
+        .alert-list {
+            display: grid;
+            gap: 12px;
+        }
+        .alert-banner {
+            padding: 14px 16px;
+            border-radius: 12px;
+            font-size: 14px;
+            font-weight: 600;
+        }
+        .alert-warning { background: #fff7ed; color: #9a3412; border-left: 4px solid #f59e0b; }
+        .alert-info { background: #eff6ff; color: #1d4ed8; border-left: 4px solid #3b82f6; }
+        .alert-danger { background: #fef2f2; color: #b91c1c; border-left: 4px solid #ef4444; }
+        .empty-note {
+            color: #6b7280;
+            font-size: 14px;
+            background: #f8fafc;
+            border-radius: 12px;
+            padding: 14px 16px;
+        }
+        .activity-list {
+            display: grid;
+            gap: 12px;
+        }
+        .activity-item {
+            padding: 14px 16px;
+            border-radius: 12px;
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+        }
+        .activity-item .title {
+            font-weight: 700;
+            color: #1f2937;
+            margin-bottom: 4px;
+        }
+        .activity-item .meta {
+            color: #64748b;
+            font-size: 12px;
+        }
+        .activity-item .details {
+            color: #475569;
+            font-size: 13px;
+            margin-top: 6px;
+        }
+        .inline-header-form {
+            margin: 0;
+            display: inline-flex;
+            gap: 8px;
+            align-items: center;
+        }
+        .logout-btn {
+            cursor: pointer;
+        }
+        @media (max-width: 900px) {
+            .overview-grid {
+                grid-template-columns: 1fr;
+            }
+        }
         .menu-section h2 {
             font-size: 18px;
             color: #333;
@@ -181,15 +332,16 @@ $is_super_admin = ($current_admin_role === 'super_admin');
             box-shadow: 0 5px 20px rgba(0,0,0,0.1);
         }
         .menu-item .icon {
-            width: 50px;
-            height: 50px;
-            border-radius: 12px;
+            width: 56px;
+            height: 56px;
+            border-radius: 15px;
             display: flex;
             align-items: center;
             justify-content: center;
-            font-size: 24px;
+            font-size: 26px;
             margin-right: 15px;
             flex-shrink: 0;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.75), 0 8px 18px rgba(15, 23, 42, 0.08);
         }
         .menu-item .text h3 { font-size: 16px; font-weight: 600; margin-bottom: 3px; }
         .menu-item .text p { font-size: 12px; color: #888; }
@@ -268,54 +420,38 @@ $is_super_admin = ($current_admin_role === 'super_admin');
 <body>
 
 <?php
-        // Fetch Total Collected Revenue (scoped by admin_id for reps, all for super_admin)
-        $semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
-        $admin_filter = $is_super_admin ? '' : "AND admin_id = $current_admin_id";
-        
-        $rev_q = "SELECT SUM(total_amount) AS total FROM requests WHERE payment_status = 'paid' AND semester_id = $semester_id $admin_filter";
-        $rev_res = $conn->query($rev_q);
-        $rev_data = $rev_res ? $rev_res->fetch_assoc() : [];
-        $total_collected = $rev_data['total'] ?? 0;
+$total_collected = floatval($dashboard_metrics['cash_collected'] ?? $dashboard_metrics['paid_revenue'] ?? 0);
+$paid_to_lecturers = floatval($dashboard_metrics['lecturer_paid'] ?? 0);
+$net_balance = floatval($dashboard_metrics['available_balance'] ?? ($total_collected - $paid_to_lecturers));
+    $total_pending = intval($dashboard_metrics['unpaid_requests'] ?? 0);
 
-        // Fetch Total Paid to Lecturers
-        $lec_q = "SELECT SUM(amount_paid) AS total FROM lecturer_payments WHERE semester_id = $semester_id $admin_filter";
-        $lec_res = $conn->query($lec_q);
-        $lec_data = $lec_res ? $lec_res->fetch_assoc() : [];
-        $paid_to_lecturers = $lec_data['total'] ?? 0;
-        
-        // Net Balance
-        $net_balance = $total_collected - $paid_to_lecturers;
-        $is_overpaid = floatval($net_balance) < 0;
-        $display_balance = $is_overpaid ? abs(floatval($net_balance)) : floatval($net_balance);
+    $semesters_result = $conn->query("SELECT semester_id, semester_name, is_active FROM semesters ORDER BY semester_id DESC");
+    $active_semester_name = function_exists('book_system_get_active_semester_name')
+        ? book_system_get_active_semester_name($conn)
+        : '';
 
-        // Fetch Pending Count
-        $pen_q = "SELECT COUNT(*) AS count FROM requests WHERE payment_status = 'unpaid' AND semester_id = $semester_id $admin_filter";
-        $pen_res = $conn->query($pen_q);
-        $pen_data = $pen_res ? $pen_res->fetch_assoc() : [];
-        $total_pending = $pen_data['count'] ?? 0;
-
-        $semesters_result = $conn->query("SELECT semester_id, semester_name, is_active FROM semesters ORDER BY semester_id DESC");
-        $active_semester_name = '';
-        if ($semesters_result) {
-            $semesters_result->data_seek(0);
-            while ($s = $semesters_result->fetch_assoc()) {
-                if (intval($s['is_active']) === 1) {
-                    $active_semester_name = $s['semester_name'];
-                    break;
-                }
-            }
-            $semesters_result->data_seek(0);
-        }
-    ?>
+    $chart_max_value = 1;
+    foreach ($semester_chart_rows as $chart_row) {
+        $chart_max_value = max(
+            $chart_max_value,
+            floatval($chart_row['revenue'] ?? 0),
+            floatval($chart_row['unpaid_balance'] ?? 0),
+            intval($chart_row['collected_items'] ?? 0),
+            intval($chart_row['pending_items'] ?? 0)
+        );
+    }
+?>
 
     <div class="dashboard-container">
         <div class="dashboard-header">
             <div>
                 <h1>Welcome, <?php echo htmlspecialchars($_SESSION['admin_full_name'] ?? $_SESSION['admin_username']); ?></h1>
-                <p class="subtitle"><?php echo $is_super_admin ? '👑 Super Admin' : '📋 ' . htmlspecialchars($current_admin_class ?: 'Class Rep'); ?><?php echo $active_semester_name ? ' • ' . htmlspecialchars($active_semester_name) : ''; ?></p>
+                <p class="subtitle"><?php echo $is_super_admin ? 'Super Admin' : 'Class Rep: ' . htmlspecialchars($current_admin_class ?: 'Unassigned'); ?><?php echo $active_semester_name ? ' &bull; ' . htmlspecialchars($active_semester_name) : ''; ?></p>
             </div>
             <div style="display:flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: flex-end;">
-                <form method="POST" style="margin: 0;">
+                <?php if ($is_super_admin): ?>
+                <form method="POST" class="inline-header-form">
+                    <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
                     <select name="semester_id" onchange="this.form.submit()" style="padding: 10px 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.35); background: rgba(255,255,255,0.18); color: white; font-weight: 700;">
                         <?php if ($semesters_result): ?>
                             <?php while ($s = $semesters_result->fetch_assoc()): ?>
@@ -327,26 +463,31 @@ $is_super_admin = ($current_admin_role === 'super_admin');
                     </select>
                     <input type="hidden" name="set_active_semester" value="1">
                 </form>
-                <form method="POST" style="margin: 0; display:flex; gap: 8px; align-items:center;">
+                <form method="POST" class="inline-header-form">
+                    <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
                     <input type="text" name="semester_name" placeholder="New semester name" required style="padding: 10px 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.35); background: rgba(255,255,255,0.18); color: white; font-weight: 700; width: 180px;">
                     <button type="submit" name="create_semester" value="1" class="logout-btn" style="padding: 10px 14px;">Create</button>
                 </form>
-                <a href="?logout=1" class="logout-btn">Logout</a>
+                <?php endif; ?>
+                <form method="POST" class="inline-header-form">
+                    <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
+                    <button type="submit" name="logout" value="1" class="logout-btn">Logout</button>
+                </form>
             </div>
         </div>
         
         <div class="stats-grid">
             <div class="stat-card green">
-                <div class="label">Total Collected</div>
-                <div class="value">GH₵ <?php echo number_format($total_collected, 2); ?></div>
+                <div class="label">Cash Collected</div>
+                <div class="value">GH&#8373; <?php echo number_format($total_collected, 2); ?></div>
             </div>
             <div class="stat-card blue">
                 <div class="label">Paid to Lecturers</div>
-                <div class="value">GH₵ <?php echo number_format($paid_to_lecturers, 2); ?></div>
+                <div class="value">GH&#8373; <?php echo number_format($paid_to_lecturers, 2); ?></div>
             </div>
             <div class="stat-card yellow">
-                <div class="label">Remaining Balance</div>
-                <div class="value">GH₵ <?php echo number_format($net_balance, 2); ?></div>
+                <div class="label">Available Balance</div>
+                <div class="value">GH&#8373; <?php echo number_format($net_balance, 2); ?></div>
             </div>
             <div class="stat-card red">
                 <div class="label">Unpaid Requests</div>
@@ -358,57 +499,64 @@ $is_super_admin = ($current_admin_role === 'super_admin');
             <h2>Quick Actions</h2>
             <div class="menu-grid">
                 <a href="manage_books.php" class="menu-item books">
-                    <div class="icon">📚</div>
+                    <div class="icon">&#128218;</div>
                     <div class="text">
                         <h3>Manage Books</h3>
                         <p>Add, edit prices & availability</p>
                     </div>
                 </a>
                 <a href="view_request.php" class="menu-item requests">
-                    <div class="icon">📩</div>
+                    <div class="icon">&#128228;</div>
                     <div class="text">
                         <h3>View Requests</h3>
                         <p>Student orders & payments</p>
                     </div>
                 </a>
                 <a href="lecturer_payments.php" class="menu-item payments">
-                    <div class="icon">💰</div>
+                    <div class="icon">&#128176;</div>
                     <div class="text">
                         <h3>Lecturer Payments</h3>
                         <p>Track payments to lecturers</p>
                     </div>
                 </a>
                 <a href="admin_manual_order.php" class="menu-item manual">
-                    <div class="icon">➕</div>
+                    <div class="icon">&#10133;</div>
                     <div class="text">
                         <h3>Manual Order</h3>
                         <p>Record cash payments</p>
                     </div>
                 </a>
                 <a href="maintenance.php" class="menu-item maintenance">
-                    <div class="icon">⚙️</div>
+                    <div class="icon">&#9881;</div>
                     <div class="text">
                         <h3>Maintenance</h3>
                         <p>System reset options</p>
                     </div>
                 </a>
                 <a href="upload_class.php" class="menu-item" style="background: #e8f5e9;">
-                    <div class="icon" style="background: #c8e6c9;">📋</div>
+                    <div class="icon" style="background: #c8e6c9;">&#128203;</div>
                     <div class="text">
                         <h3>Upload Class</h3>
                         <p>Import your class roster</p>
                     </div>
                 </a>
                 <a href="my_profile.php" class="menu-item" style="background: #e1f5fe;">
-                    <div class="icon" style="background: #b3e5fc;">👤</div>
+                    <div class="icon" style="background: #b3e5fc;">&#128100;</div>
                     <div class="text">
                         <h3>My Profile</h3>
                         <p>Update payment details</p>
                     </div>
                 </a>
+                <a href="activity_log.php" class="menu-item" style="background: #f8fafc;">
+                    <div class="icon" style="background: #e2e8f0;">&#128221;</div>
+                    <div class="text">
+                        <h3>Activity Log</h3>
+                        <p>See who changed requests, payments, and approvals</p>
+                    </div>
+                </a>
                 <?php if (!$is_super_admin): ?>
                 <a href="generate_access_code.php" class="menu-item" style="background: #fce4ec;">
-                    <div class="icon" style="background: #f8bbd9;">🔐</div>
+                    <div class="icon" style="background: #f8bbd9;">&#128274;</div>
                     <div class="text">
                         <h3>Access Code</h3>
                         <p>Control super admin access</p>
@@ -417,24 +565,38 @@ $is_super_admin = ($current_admin_role === 'super_admin');
                 <?php endif; ?>
                 <?php if ($is_super_admin): ?>
                 <a href="manage_reps.php" class="menu-item" style="background: #fff3e0;">
-                    <div class="icon" style="background: #ffe0b2;">👥</div>
+                    <div class="icon" style="background: #ffe0b2;">&#128101;</div>
                     <div class="text">
                         <h3>Manage Reps</h3>
                         <p>Create & manage rep accounts</p>
                     </div>
                 </a>
                 <a href="manage_rep_signups.php" class="menu-item" style="background: #e8f5e9;">
-                    <div class="icon" style="background: #c8e6c9;">✅</div>
+                    <div class="icon" style="background: #c8e6c9;">&#9989;</div>
                     <div class="text">
                         <h3>Rep Signup Payments</h3>
                         <p>Confirm payment & approve reps</p>
                     </div>
                 </a>
+                <a href="manage_lecturers.php" class="menu-item" style="background: #fff7ed;">
+                    <div class="icon" style="background: #fed7aa;">&#127891;</div>
+                    <div class="text">
+                        <h3>Manage Lecturers</h3>
+                        <p>Create lecturer accounts and assign books</p>
+                    </div>
+                </a>
                 <a href="view_rep_data.php" class="menu-item" style="background: #e3f2fd;">
-                    <div class="icon" style="background: #bbdefb;">👁️</div>
+                    <div class="icon" style="background: #bbdefb;">&#128065;</div>
                     <div class="text">
                         <h3>View Rep Data</h3>
                         <p>Access rep records with code</p>
+                    </div>
+                </a>
+                <a href="admin_setup.php" class="menu-item" style="background: #eef2ff;">
+                    <div class="icon" style="background: #c7d2fe;">&#128736;</div>
+                    <div class="text">
+                        <h3>System Setup</h3>
+                        <p>Run one-time setup and migration tasks</p>
                     </div>
                 </a>
                 <?php endif; ?>
@@ -446,3 +608,5 @@ $is_super_admin = ($current_admin_role === 'super_admin');
 
 </body>
 </html>
+
+

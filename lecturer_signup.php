@@ -2,6 +2,12 @@
 session_start();
 error_reporting(0);
 require_once 'db.php';
+if (file_exists(__DIR__ . '/setup_tasks.php')) {
+    require_once __DIR__ . '/setup_tasks.php';
+    if (function_exists('book_system_setup_ensure_column')) {
+        book_system_setup_ensure_column($conn, 'lecturers', 'teaching_level', 'VARCHAR(10) NULL AFTER full_name');
+    }
+}
 
 if (isset($_SESSION['lecturer_logged_in']) && intval($_SESSION['lecturer_logged_in']) === 1) {
     header('Location: lecturer_dashboard.php');
@@ -11,6 +17,9 @@ if (isset($_SESSION['lecturer_logged_in']) && intval($_SESSION['lecturer_logged_
 $error = '';
 $success = '';
 $csrf_token = csrf_get_token();
+$teaching_level_options = function_exists('book_system_get_teaching_level_options')
+    ? book_system_get_teaching_level_options()
+    : ['100', '200', '300', '400'];
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!csrf_validate($_POST['csrf_token'] ?? null)) {
@@ -18,10 +27,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } else {
         $username = substr(trim(strval($_POST['username'] ?? '')), 0, 50);
         $full_name = substr(trim(strval($_POST['full_name'] ?? '')), 0, 100);
+        $teaching_level = function_exists('book_system_normalize_teaching_level')
+            ? book_system_normalize_teaching_level($_POST['teaching_level'] ?? '')
+            : preg_replace('/[^0-9]/', '', strval($_POST['teaching_level'] ?? ''));
         $password = strval($_POST['password'] ?? '');
         $confirm_password = strval($_POST['confirm_password'] ?? '');
 
-        if ($username === '' || $full_name === '' || $password === '') {
+        if ($username === '' || $full_name === '' || $password === '' || $teaching_level === '') {
             $error = 'All fields are required.';
         } elseif (!preg_match('/^[a-zA-Z0-9._-]{3,50}$/', $username)) {
             $error = 'Username must be 3-50 characters and contain only letters, numbers, dot, underscore, or dash.';
@@ -58,9 +70,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 // Require activation by default
                 $is_active = 0;
-                $stmt = $conn->prepare("INSERT INTO lecturers (username, password_hash, full_name, is_active) VALUES (?, ?, ?, ?)");
+                $stmt = $conn->prepare("INSERT INTO lecturers (username, password_hash, full_name, teaching_level, is_active) VALUES (?, ?, ?, ?, ?)");
                 if ($stmt) {
-                    $stmt->bind_param('sssi', $username, $hash, $full_name, $is_active);
+                    $stmt->bind_param('ssssi', $username, $hash, $full_name, $teaching_level, $is_active);
                     if ($stmt->execute()) {
                         header('Location: lecturer_login.php?signed_up=1');
                         exit;
@@ -126,7 +138,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         .form-group { margin-bottom: 16px; }
         .form-group label { display: block; font-weight: 700; color: #374151; margin-bottom: 8px; font-size: 13px; }
-        .form-group input {
+        .form-group input,
+        .form-group select {
             width: 100%;
             padding: 14px 16px;
             border: 2px solid #e5e7eb;
@@ -134,7 +147,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             font-size: 14px;
             background: #f9fafb;
         }
-        .form-group input:focus { outline: none; border-color: #111827; background: white; }
+        .form-group input:focus,
+        .form-group select:focus { outline: none; border-color: #111827; background: white; }
 
         .btn {
             width: 100%;
@@ -193,6 +207,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <div class="form-group">
                 <label>Username *</label>
                 <input type="text" name="username" required>
+            </div>
+
+            <div class="form-group">
+                <label>Teaching Level *</label>
+                <select name="teaching_level" required>
+                    <option value="">Select level</option>
+                    <?php foreach ($teaching_level_options as $level_option): ?>
+                        <option value="<?php echo htmlspecialchars($level_option); ?>"><?php echo htmlspecialchars($level_option); ?></option>
+                    <?php endforeach; ?>
+                </select>
             </div>
 
             <div class="form-group">

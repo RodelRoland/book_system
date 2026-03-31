@@ -10,12 +10,12 @@ $current_admin_id = intval($_SESSION['admin_id'] ?? 0);
 $current_admin_role = $_SESSION['admin_role'] ?? 'rep';
 $is_super_admin = ($current_admin_role === 'super_admin');
 
-if (isset($_GET['request_id'])) {
-    if (!csrf_validate($_GET['csrf_token'] ?? null)) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['request_id'])) {
+    if (!csrf_validate($_POST['csrf_token'] ?? null)) {
         header("Location: view_request.php?msg=csrf_invalid");
         exit;
     }
-    $request_id = intval($_GET['request_id']);
+    $request_id = intval($_POST['request_id'] ?? 0);
 
     if ($request_id <= 0) {
         header("Location: view_request.php?msg=invalid_request");
@@ -60,6 +60,11 @@ if (isset($_GET['request_id'])) {
             }
         }
         $upd->execute();
+        if ($upd->affected_rows >= 0 && function_exists('book_system_audit_log')) {
+            book_system_audit_log($conn, 'toggle_payment', 'request', $request_id, [
+                'payment_status' => $new_status,
+            ]);
+        }
     }
 }
 

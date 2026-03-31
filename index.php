@@ -1,11 +1,13 @@
-<?php
+﻿<?php
 global $conn;
 include 'db.php';
 
 // Get rep ID from URL parameter (allows each rep to share their unique link)
 $rep_id = 0;
 $rep_info = null;
-if (isset($_GET['rep'])) {
+$rep_param_supplied = array_key_exists('rep', $_GET);
+$invalid_rep_link = false;
+if ($rep_param_supplied) {
     $rep_username = substr(trim(strval($_GET['rep'] ?? '')), 0, 50);
     if ($rep_username !== '') {
         $rep_stmt = $conn->prepare("SELECT admin_id, full_name, class_name FROM admins WHERE username = ? AND is_active = 1 LIMIT 1");
@@ -19,10 +21,13 @@ if (isset($_GET['rep'])) {
             }
         }
     }
+    if ($rep_id <= 0) {
+        $invalid_rep_link = true;
+    }
 }
 
 // Fallback to super admin
-if ($rep_id <= 0) {
+if ($rep_id <= 0 && !$rep_param_supplied) {
     $default_rep = $conn->query("SELECT admin_id, full_name, class_name FROM admins WHERE role = 'super_admin' AND is_active = 1 LIMIT 1");
     if ($default_rep && $default_rep->num_rows > 0) {
         $rep_info = $default_rep->fetch_assoc();
@@ -58,10 +63,21 @@ $csrf_token = csrf_get_token();
 
     <h2>Course Material Request</h2>
 
+    <?php if ($invalid_rep_link): ?>
+        <div style="background:#fef2f2; color:#b91c1c; border:1px solid #fecaca; padding:14px 16px; border-radius:12px; margin-bottom:18px;">
+            This rep link is invalid or no longer active. Please contact your class rep for the correct order link.
+        </div>
+    <?php elseif ($rep_info): ?>
+        <div style="background:#eff6ff; color:#1d4ed8; border:1px solid #bfdbfe; padding:14px 16px; border-radius:12px; margin-bottom:18px;">
+            Orders from this page will be assigned to <?php echo htmlspecialchars($rep_info['full_name'] ?? 'the selected rep'); ?><?php echo !empty($rep_info['class_name']) ? ' (' . htmlspecialchars($rep_info['class_name']) . ')' : ''; ?>.
+        </div>
+    <?php endif; ?>
+
+    <?php if (!$invalid_rep_link): ?>
     <form method="post" action="submit_request.php" id="requestForm">
         <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
 
-        <!-- ── STEP 1 ── Personal Information ─────────────────────────────── -->
+        <!-- â”€â”€ STEP 1 â”€â”€ Personal Information â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
         <div id="step1" class="form-step active">
 
             <div class="step-header">
@@ -98,7 +114,7 @@ $csrf_token = csrf_get_token();
             <div id="credit_info" style="display: none; background: #d4edda; border: 1px solid #28a745; padding: 12px; border-radius: 8px; margin: 15px 0;">
                 <strong style="color: #155724;">You have a credit balance!</strong>
                 <div style="font-size: 20px; color: #28a745; font-weight: bold; margin-top: 5px;">
-                    GH₵ <span id="credit_amount">0.00</span>
+                    GH&#8373; <span id="credit_amount">0.00</span>
                 </div>
                 <small style="color: #155724;">This will be automatically applied to your next order.</small>
             </div>
@@ -110,7 +126,7 @@ $csrf_token = csrf_get_token();
             <p class="step-info">Next: Select course materials</p>
         </div>
 
-        <!-- ── STEP 2 ── Book Selection & Payment ───────────────────────────── -->
+        <!-- â”€â”€ STEP 2 â”€â”€ Book Selection & Payment â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
         <div id="step2" class="form-step">
 
             <div class="step-header">
@@ -119,7 +135,7 @@ $csrf_token = csrf_get_token();
             </div>
 
             <button type="button" id="btnBack" class="secondary-btn">
-                ← Back
+                &larr; Back
             </button>
 
             <?php if (empty($books_array)) { ?>
@@ -138,7 +154,7 @@ $csrf_token = csrf_get_token();
                         >
                         <span class="book-title">
                             <?php echo htmlspecialchars($row['book_title']); ?>
-                            – GH₵ <?php echo number_format($row['price'], 2); ?>
+                             - GH&#8373; <?php echo number_format($row['price'], 2); ?>
                         </span>
                     </label>
                 <?php } ?>
@@ -148,16 +164,16 @@ $csrf_token = csrf_get_token();
 
             <div class="total-line">
                 <span>Subtotal:</span>
-                <strong>GH₵ <span id="subtotal">0.00</span></strong>
+                <strong>GH&#8373; <span id="subtotal">0.00</span></strong>
             </div>
 
             <div class="total-line">
                 <span>MoMo Charge (1%):</span>
-                <strong>GH₵ <span id="momo_charge">0.00</span></strong>
+                <strong>GH&#8373; <span id="momo_charge">0.00</span></strong>
             </div>
 
             <div class="final-total">
-                Total to Pay: GH₵ <span id="final_total">0.00</span>
+                Total to Pay: GH&#8373; <span id="final_total">0.00</span>
             </div>
 
             <!-- Hidden fields -->
@@ -173,11 +189,12 @@ $csrf_token = csrf_get_token();
         </div>
 
     </form>
+    <?php endif; ?>
 
 </div>
 
 <script>
-    // ── CALCULATION ────────────────────────────────────────────────
+    // â”€â”€ CALCULATION â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     function calculateTotal() {
         let subtotal = 0;
         document.querySelectorAll(".book-check").forEach(book => {
@@ -202,7 +219,7 @@ $csrf_token = csrf_get_token();
         book.addEventListener("change", calculateTotal);
     });
 
-    // ── STEP NAVIGATION ─────────────────────────────────────────────
+    // â”€â”€ STEP NAVIGATION â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const step1 = document.getElementById("step1");
     const step2 = document.getElementById("step2");
     const btnToStep2 = document.getElementById("btnToStep2");
@@ -349,3 +366,5 @@ document.querySelector('input[name="index_number"]').addEventListener('blur', fu
     
 </body>
 </html>
+
+

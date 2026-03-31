@@ -82,13 +82,15 @@ $reps_sql = "
         a.is_active,
         a.access_code IS NOT NULL AND a.access_code_expires > NOW() AS has_valid_code,
         COALESCE(rs.request_count, 0) as request_count,
-        COALESCE(rs.total_collected, 0) as total_collected,
+        COALESCE(rs.cash_collected, 0) as total_collected,
+        COALESCE(rs.refundable_cash, 0) as refundable_cash,
         COALESCE(lps.paid_to_lecturers, 0) as paid_to_lecturers
     FROM admins a
     LEFT JOIN (
         SELECT admin_id,
                COUNT(*) AS request_count,
-               SUM(CASE WHEN payment_status = 'paid' THEN total_amount ELSE 0 END) AS total_collected
+               SUM(CASE WHEN payment_status = 'paid' THEN amount_paid ELSE 0 END) AS cash_collected,
+               SUM(CASE WHEN payment_status = 'paid' THEN GREATEST(amount_paid - GREATEST(total_amount - COALESCE(credit_used, 0), 0), 0) ELSE 0 END) AS refundable_cash
         FROM requests
         WHERE semester_id = $semester_id
         GROUP BY admin_id
@@ -448,11 +450,11 @@ if ($viewing_rep_id) {
                     </div>
                     <div class="stat">
                         <div class="value">GH₵<?php echo number_format($rep['total_collected'], 0); ?></div>
-                        <div class="label">Collected</div>
+                        <div class="label">Cash</div>
                     </div>
                     <div class="stat">
-                        <div class="value">GH₵<?php echo number_format($rep['total_collected'] - $rep['paid_to_lecturers'], 0); ?></div>
-                        <div class="label">Balance</div>
+                        <div class="value">GH₵<?php echo number_format($rep['total_collected'] - $rep['paid_to_lecturers'] - $rep['refundable_cash'], 0); ?></div>
+                        <div class="label">Available</div>
                     </div>
                 </div>
                 <div class="code-status <?php echo $rep['has_valid_code'] ? 'active' : 'inactive'; ?>">

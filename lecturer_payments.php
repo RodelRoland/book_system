@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 session_start();
 require_once 'db.php';
 
@@ -82,6 +82,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['record_received'])) {
         $stmt->bind_param("iidsssii", $book_id, $copies_received, $unit_price, $receive_date, $lecturer_name, $notes, $semester_id, $current_admin_id);
         
         if ($stmt->execute()) {
+            if (function_exists('book_system_audit_log')) {
+                book_system_audit_log($conn, 'record_books_received', 'books_received', intval($conn->insert_id), [
+                    'book_id' => $book_id,
+                    'copies_received' => $copies_received,
+                    'unit_price' => $unit_price,
+                    'receive_date' => $receive_date,
+                    'lecturer_name' => $lecturer_name,
+                ]);
+            }
             $success_msg = "Books received recorded successfully!";
         } else {
             $error_msg = "Error recording: " . $conn->error;
@@ -116,6 +125,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_received'])) {
             $stmt->bind_param("idsssiii", $copies_received, $unit_price, $receive_date, $lecturer_name, $notes, $receive_id, $book_id, $current_admin_id);
         }
         if ($stmt->execute()) {
+            if (function_exists('book_system_audit_log')) {
+                book_system_audit_log($conn, 'update_books_received', 'books_received', $receive_id, [
+                    'book_id' => $book_id,
+                    'copies_received' => $copies_received,
+                    'unit_price' => $unit_price,
+                    'receive_date' => $receive_date,
+                    'lecturer_name' => $lecturer_name,
+                ]);
+            }
             $success_msg = "Received record updated successfully!";
         } else {
             $error_msg = "Error updating record: " . $conn->error;
@@ -146,6 +164,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_received'])) {
             $stmt->bind_param("iii", $receive_id, $book_id, $current_admin_id);
         }
         if ($stmt->execute()) {
+            if (function_exists('book_system_audit_log')) {
+                book_system_audit_log($conn, 'delete_books_received', 'books_received', $receive_id, [
+                    'book_id' => $book_id,
+                ]);
+            }
             $success_msg = "Received record deleted successfully!";
         } else {
             $error_msg = "Error deleting record: " . $conn->error;
@@ -175,6 +198,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['record_payment'])) {
             $stmt->bind_param("iidssii", $book_id, $copies_paid, $amount_paid, $payment_date, $notes, $semester_id, $current_admin_id);
 
             if ($stmt->execute()) {
+                if (function_exists('book_system_audit_log')) {
+                    book_system_audit_log($conn, 'record_lecturer_payment', 'lecturer_payment', intval($conn->insert_id), [
+                        'book_id' => $book_id,
+                        'copies_paid' => $copies_paid,
+                        'amount_paid' => $amount_paid,
+                        'payment_date' => $payment_date,
+                    ]);
+                }
                 $success_msg = "Payment recorded successfully!";
             } else {
                 $error_msg = "Error recording payment: " . $conn->error;
@@ -208,6 +239,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_payment'])) {
             $stmt->bind_param("idssiii", $copies_paid, $amount_paid, $payment_date, $notes, $payment_id, $book_id, $current_admin_id);
         }
         if ($stmt->execute()) {
+            if (function_exists('book_system_audit_log')) {
+                book_system_audit_log($conn, 'update_lecturer_payment', 'lecturer_payment', $payment_id, [
+                    'book_id' => $book_id,
+                    'copies_paid' => $copies_paid,
+                    'amount_paid' => $amount_paid,
+                    'payment_date' => $payment_date,
+                ]);
+            }
             $success_msg = "Payment record updated successfully!";
         } else {
             $error_msg = "Error updating payment: " . $conn->error;
@@ -238,6 +277,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_payment'])) {
             $stmt->bind_param("iii", $payment_id, $book_id, $current_admin_id);
         }
         if ($stmt->execute()) {
+            if (function_exists('book_system_audit_log')) {
+                book_system_audit_log($conn, 'delete_lecturer_payment', 'lecturer_payment', $payment_id, [
+                    'book_id' => $book_id,
+                ]);
+            }
             $success_msg = "Payment record deleted successfully!";
         } else {
             $error_msg = "Error deleting payment: " . $conn->error;
@@ -583,6 +627,77 @@ $filter_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY boo
             border: 1px solid rgba(255,255,255,0.3);
         }
         .back-btn:hover { background: rgba(255,255,255,0.3); }
+        .page-title {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            flex-wrap: wrap;
+        }
+        .title-icon {
+            width: 52px;
+            height: 52px;
+            border-radius: 16px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            background: rgba(255,255,255,0.18);
+            border: 1px solid rgba(255,255,255,0.28);
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.18);
+            flex-shrink: 0;
+        }
+        .header-toolbar {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+        }
+        .header-select {
+            padding: 10px 12px;
+            border-radius: 8px;
+            border: 1px solid rgba(255,255,255,0.35);
+            background: rgba(255,255,255,0.18);
+            color: white;
+            font-weight: 600;
+            min-width: 240px;
+        }
+        .header-select option { color: #333; }
+        .selected-book-summary {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            align-items: flex-end;
+        }
+        .selected-book-summary .title {
+            font-weight: 700;
+            font-size: 12px;
+            opacity: 0.95;
+            max-width: 320px;
+            text-align: right;
+            line-height: 1.4;
+            overflow-wrap: anywhere;
+        }
+        .selected-book-summary .badges {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+        }
+        .selected-book-summary .badge {
+            padding: 6px 10px;
+            border-radius: 999px;
+            font-weight: 700;
+            font-size: 12px;
+        }
+        .selected-book-summary .badge-received {
+            background: rgba(40,167,69,0.18);
+            border: 1px solid rgba(40,167,69,0.35);
+        }
+        .selected-book-summary .badge-yet {
+            background: rgba(220,53,69,0.18);
+            border: 1px solid rgba(220,53,69,0.35);
+        }
         
         .stats-grid {
             display: grid;
@@ -601,6 +716,7 @@ $filter_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY boo
             position: relative;
             overflow: hidden;
             min-width: 0;
+            height: 100%;
         }
         .stat-card::before {
             content: '';
@@ -612,10 +728,66 @@ $filter_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY boo
         .stat-card.blue::before { background: #17a2b8; }
         .stat-card.red::before { background: #dc3545; }
         .stat-card .label { font-size: 12px; text-transform: uppercase; color: #888; font-weight: 600; margin-bottom: 8px; }
-        .stat-card .value { font-size: 26px; font-weight: 700; overflow-wrap: anywhere; }
+        .stat-card .value { font-size: 26px; font-weight: 700; overflow-wrap: anywhere; line-height: 1.2; }
         .stat-card.green .value { color: #28a745; }
         .stat-card.blue .value { color: #17a2b8; }
         .stat-card.red .value { color: #dc3545; }
+        .book-scroll-section {
+            overflow-x: auto;
+            overflow-y: hidden;
+            padding-bottom: 2px;
+            -webkit-overflow-scrolling: touch;
+        }
+        .book-switch-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 20px;
+        }
+        .book-switch-link {
+            display: block;
+            text-decoration: none;
+            min-width: 0;
+        }
+        .book-switch-card {
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .book-switch-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 12px 24px rgba(15, 23, 42, 0.12);
+        }
+        .book-switch-card.active-green { box-shadow: 0 0 0 3px #28a745; }
+        .book-switch-card.active-red { box-shadow: 0 0 0 3px #dc3545; }
+        .section-heading {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            line-height: 1.4;
+        }
+        .section-heading .mini-icon {
+            width: 34px;
+            height: 34px;
+            border-radius: 12px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background: #eef2ff;
+            color: #4338ca;
+            font-size: 16px;
+            flex-shrink: 0;
+        }
+        .section-heading.success .mini-icon {
+            background: #dcfce7;
+            color: #15803d;
+        }
+        .section-heading.danger .mini-icon {
+            background: #fee2e2;
+            color: #b91c1c;
+        }
+        .section-heading.info .mini-icon {
+            background: #e0f2fe;
+            color: #0369a1;
+        }
         
         .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 25px; }
         @media (max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } }
@@ -682,6 +854,41 @@ $filter_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY boo
         }
         td { padding: 12px; border-bottom: 1px solid #f0f0f0; font-size: 14px; }
         tr:hover { background: #fafbfc; }
+        .recent-grid {
+            align-items: start;
+        }
+        .recent-card {
+            height: 100%;
+        }
+        .recent-table-container {
+            overflow: visible;
+        }
+        .recent-table {
+            min-width: 0;
+            table-layout: fixed;
+        }
+        .recent-table th,
+        .recent-table td {
+            white-space: normal;
+            overflow-wrap: anywhere;
+            vertical-align: top;
+        }
+        .recent-table th:nth-child(1),
+        .recent-table td:nth-child(1) {
+            width: 24%;
+        }
+        .recent-table th:nth-child(2),
+        .recent-table td:nth-child(2) {
+            width: 36%;
+        }
+        .recent-table th:nth-child(3),
+        .recent-table td:nth-child(3) {
+            width: 16%;
+        }
+        .recent-table th:nth-child(4),
+        .recent-table td:nth-child(4) {
+            width: 24%;
+        }
         
         .stat-positive { color: #28a745; font-weight: 700; }
         .stat-danger { color: #dc3545; font-weight: 700; }
@@ -690,45 +897,108 @@ $filter_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY boo
         .progress-fill { height: 100%; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
         
         .empty-state { text-align: center; padding: 30px; color: #888; }
+        @media (max-width: 980px) {
+            .page-header {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+            .header-toolbar {
+                width: 100%;
+                justify-content: flex-start;
+            }
+            .selected-book-summary {
+                align-items: flex-start;
+            }
+            .selected-book-summary .title,
+            .selected-book-summary .badges {
+                text-align: left;
+                justify-content: flex-start;
+            }
+            .book-switch-grid {
+                min-width: 780px;
+            }
+        }
+        @media (max-width: 640px) {
+            .recent-table,
+            .recent-table thead,
+            .recent-table tbody,
+            .recent-table tr,
+            .recent-table td {
+                display: block;
+                width: 100%;
+            }
+            .recent-table {
+                min-width: 0;
+            }
+            .recent-table thead {
+                display: none;
+            }
+            .recent-table tr {
+                border: 1px solid #e2e8f0;
+                border-radius: 12px;
+                padding: 12px;
+                margin-bottom: 12px;
+                background: #f8fafc;
+            }
+            .recent-table td {
+                border: none;
+                padding: 6px 0;
+            }
+            .recent-table td::before {
+                content: attr(data-label);
+                display: block;
+                font-size: 11px;
+                font-weight: 700;
+                text-transform: uppercase;
+                letter-spacing: 0.04em;
+                color: #64748b;
+                margin-bottom: 4px;
+            }
+        }
     </style>
 </head>
 <body>
 <div class="page-container">
     <div class="page-header">
         <div>
-            <h1>💰 Lecturer Payments</h1>
-            <p class="subtitle">Track payments made to lecturers for each book</p>
+            <div class="page-title">
+                <span class="title-icon">&#128176;</span>
+                <div>
+                    <h1>Lecturer Payments</h1>
+                    <p class="subtitle">Track payments made to lecturers for each book</p>
+                </div>
+            </div>
         </div>
-        <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap; justify-content: flex-end;">
+        <div class="header-toolbar">
             <form method="GET" style="margin: 0;">
-                <select name="book_id" onchange="this.form.submit()" style="padding: 10px 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.35); background: rgba(255,255,255,0.18); color: white; font-weight: 600;">
-                    <option value="" style="color:#333;">Filter by book...</option>
+                <select name="book_id" onchange="this.form.submit()" class="header-select">
+                    <option value="">Filter by book...</option>
                     <?php while ($b = $filter_books->fetch_assoc()): ?>
-                        <option value="<?php echo intval($b['book_id']); ?>" <?php echo ($selected_book_id === intval($b['book_id'])) ? 'selected' : ''; ?> style="color:#333;">
+                        <option value="<?php echo intval($b['book_id']); ?>" <?php echo ($selected_book_id === intval($b['book_id'])) ? 'selected' : ''; ?>>
                             <?php echo htmlspecialchars($b['book_title']); ?>
                         </option>
                     <?php endwhile; ?>
                 </select>
             </form>
             <?php if ($selected_book_id > 0): ?>
-                <div style="display:flex; flex-direction: column; gap: 4px; align-items: flex-end;">
-                    <div style="font-weight: 700; font-size: 12px; opacity: 0.95; max-width: 320px; text-align: right;">
+                <div class="selected-book-summary">
+                    <div class="title">
                         <?php echo htmlspecialchars($selected_book_title); ?>
                     </div>
-                    <div style="display:flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end;">
-                        <span style="background: rgba(40,167,69,0.18); border: 1px solid rgba(40,167,69,0.35); padding: 6px 10px; border-radius: 999px; font-weight: 700; font-size: 12px;">
+                    <div class="badges">
+                        <span class="badge badge-received">
                             Received: <?php echo number_format($selected_received_students); ?>
                         </span>
-                        <span style="background: rgba(220,53,69,0.18); border: 1px solid rgba(220,53,69,0.35); padding: 6px 10px; border-radius: 999px; font-weight: 700; font-size: 12px;">
+                        <span class="badge badge-yet">
                             Yet: <?php echo number_format($selected_yet_students); ?>
                         </span>
                     </div>
                 </div>
             <?php endif; ?>
-            <a href="admin.php" class="back-btn">← Back to Dashboard</a>
+            <a href="admin.php" class="back-btn">&larr; Back to Dashboard</a>
         </div>
     </div>
-    
+
     <?php
     // Calculate totals
     $total_received = 0;
@@ -762,45 +1032,50 @@ $filter_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY boo
         </div>
         <div class="stat-card" style="--card-color: #6f42c1;">
             <div class="label">Paid to Lecturers</div>
-            <div class="value" style="color: #6f42c1;">GH₵ <?php echo number_format($total_paid_to_lecturers, 2); ?></div>
+            <div class="value" style="color: #6f42c1;">GH&#8373; <?php echo number_format($total_paid_to_lecturers, 2); ?></div>
         </div>
         <div class="stat-card red">
             <div class="label">Unpaid to Lecturers</div>
             <div class="value">
                 <?php if ($is_overpaid_total): ?>
-                    Overpaid GH₵ <?php echo number_format(abs($unpaid_to_lecturer), 2); ?>
+                    Overpaid GH&#8373; <?php echo number_format(abs($unpaid_to_lecturer), 2); ?>
                 <?php else: ?>
-                    GH₵ <?php echo number_format($unpaid_to_lecturer, 2); ?>
+                    GH&#8373; <?php echo number_format($unpaid_to_lecturer, 2); ?>
                 <?php endif; ?>
             </div>
         </div>
     </div>
 
     <?php if ($selected_book_id > 0): ?>
-        <div class="stats-grid" style="grid-template-columns: repeat(3, 1fr);">
+        <div class="book-scroll-section" style="margin-bottom: 20px;">
+        <div class="book-switch-grid">
             <div class="stat-card blue">
                 <div class="label">Selected Book</div>
                 <div class="value" style="font-size: 16px; font-weight: 700; color: #17a2b8;">
                     <?php echo htmlspecialchars($selected_book_title); ?>
                 </div>
             </div>
-            <a href="?book_id=<?php echo $selected_book_id; ?>&show_received=1" style="text-decoration: none;">
-                <div class="stat-card green" style="cursor: pointer; transition: transform 0.2s, box-shadow 0.2s; <?php echo $show_received_list ? 'box-shadow: 0 0 0 3px #28a745;' : ''; ?>">
+            <a href="?book_id=<?php echo $selected_book_id; ?>&show_received=1" class="book-switch-link">
+                <div class="stat-card green book-switch-card <?php echo $show_received_list ? 'active-green' : ''; ?>">
                     <div class="label">Students Received <span style="font-size:10px;">(Click to view)</span></div>
                     <div class="value"><?php echo number_format($selected_received_students); ?></div>
                 </div>
             </a>
-            <a href="?book_id=<?php echo $selected_book_id; ?>&show_yet=1" style="text-decoration: none;">
-                <div class="stat-card red" style="cursor: pointer; transition: transform 0.2s, box-shadow 0.2s; <?php echo $show_yet_list ? 'box-shadow: 0 0 0 3px #dc3545;' : ''; ?>">
+            <a href="?book_id=<?php echo $selected_book_id; ?>&show_yet=1" class="book-switch-link">
+                <div class="stat-card red book-switch-card <?php echo $show_yet_list ? 'active-red' : ''; ?>">
                     <div class="label">Students Yet to Receive <span style="font-size:10px;">(Click to view)</span></div>
                     <div class="value"><?php echo number_format($selected_yet_students); ?></div>
                 </div>
             </a>
         </div>
+        </div>
 
         <?php if ($show_received_list && $students_received && $students_received->num_rows > 0): ?>
         <div class="card" style="margin-bottom: 25px; border-left: 4px solid #28a745;">
-            <h3 style="color: #28a745;">📋 Students Received "<?php echo htmlspecialchars($selected_book_title); ?>" (<?php echo $students_received->num_rows; ?>)</h3>
+            <h3 class="section-heading success" style="color: #28a745;">
+                <span class="mini-icon">&#128203;</span>
+                <span>Students Received "<?php echo htmlspecialchars($selected_book_title); ?>" (<?php echo $students_received->num_rows; ?>)</span>
+            </h3>
             <div style="display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap;">
                 <a href="?book_id=<?php echo $selected_book_id; ?>" class="btn-primary" style="width: auto; padding: 8px 16px; font-size: 13px; text-decoration: none; display: inline-block; background: #6c757d;">Hide List</a>
                 <a href="?book_id=<?php echo $selected_book_id; ?>&export_received=1" class="btn-primary" style="width: auto; padding: 8px 16px; font-size: 13px; text-decoration: none; display: inline-block;">Export (Excel)</a>
@@ -832,15 +1107,21 @@ $filter_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY boo
         </div>
         <?php elseif ($show_received_list): ?>
         <div class="card" style="margin-bottom: 25px; border-left: 4px solid #28a745;">
-            <h3 style="color: #28a745;">ℹ️ No students marked as received for "<?php echo htmlspecialchars($selected_book_title); ?>"</h3>
+            <h3 class="section-heading info" style="color: #28a745;">
+                <span class="mini-icon">&#8505;</span>
+                <span>No students marked as received for "<?php echo htmlspecialchars($selected_book_title); ?>"</span>
+            </h3>
             <p style="color: #666;">No collected records found for this book.</p>
-            <a href="?book_id=<?php echo $selected_book_id; ?>" style="color: #667eea; font-weight: 600;">← Back</a>
+            <a href="?book_id=<?php echo $selected_book_id; ?>" style="color: #667eea; font-weight: 600;">&larr; Back</a>
         </div>
         <?php endif; ?>
         
         <?php if ($show_yet_list && $students_yet_to_receive && $students_yet_to_receive->num_rows > 0): ?>
         <div class="card" style="margin-bottom: 25px; border-left: 4px solid #dc3545;">
-            <h3 style="color: #dc3545;">📋 Students Yet to Receive "<?php echo htmlspecialchars($selected_book_title); ?>" (<?php echo $students_yet_to_receive->num_rows; ?>)</h3>
+            <h3 class="section-heading danger" style="color: #dc3545;">
+                <span class="mini-icon">&#128203;</span>
+                <span>Students Yet to Receive "<?php echo htmlspecialchars($selected_book_title); ?>" (<?php echo $students_yet_to_receive->num_rows; ?>)</span>
+            </h3>
             <div style="display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap;">
                 <a href="?book_id=<?php echo $selected_book_id; ?>" class="btn-primary" style="width: auto; padding: 8px 16px; font-size: 13px; text-decoration: none; display: inline-block;">Hide List</a>
             </div>
@@ -871,16 +1152,22 @@ $filter_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY boo
         </div>
         <?php elseif ($show_yet_list): ?>
         <div class="card" style="margin-bottom: 25px; border-left: 4px solid #28a745;">
-            <h3 style="color: #28a745;">✅ All students have received "<?php echo htmlspecialchars($selected_book_title); ?>"</h3>
+            <h3 class="section-heading success" style="color: #28a745;">
+                <span class="mini-icon">&#10004;</span>
+                <span>All students have received "<?php echo htmlspecialchars($selected_book_title); ?>"</span>
+            </h3>
             <p style="color: #666;">No pending collections for this book.</p>
-            <a href="?book_id=<?php echo $selected_book_id; ?>" style="color: #667eea; font-weight: 600;">← Back</a>
+            <a href="?book_id=<?php echo $selected_book_id; ?>" style="color: #667eea; font-weight: 600;">&larr; Back</a>
         </div>
         <?php endif; ?>
     <?php endif; ?>
 
     <?php if ($selected_book_id > 0): ?>
         <div class="card" style="margin-top: 25px;">
-            <h3>✏️ Edit Records — <?php echo htmlspecialchars($selected_book_title); ?></h3>
+            <h3 class="section-heading">
+                <span class="mini-icon">&#9998;</span>
+                <span>Edit Records - <?php echo htmlspecialchars($selected_book_title); ?></span>
+            </h3>
             <div class="table-container">
                 <table>
                     <thead>
@@ -890,7 +1177,7 @@ $filter_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY boo
                         <tr>
                             <th>Date</th>
                             <th>Copies</th>
-                            <th>Unit Price (GH₵)</th>
+                            <th>Unit Price (GH&#8373;)</th>
                             <th>Lecturer</th>
                             <th>Notes</th>
                             <th>Action</th>
@@ -942,7 +1229,7 @@ $filter_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY boo
                         <tr>
                             <th>Date</th>
                             <th>Copies</th>
-                            <th>Amount (GH₵)</th>
+                            <th>Amount (GH&#8373;)</th>
                             <th>Notes</th>
                             <th>Action</th>
                         </tr>
@@ -993,7 +1280,10 @@ $filter_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY boo
     <div class="grid-2">
         <!-- Record Books Received Form -->
         <div class="card">
-            <h3>📦 Record Books Received from Lecturer</h3>
+            <h3 class="section-heading">
+                <span class="mini-icon">&#128230;</span>
+                <span>Record Books Received from Lecturer</span>
+            </h3>
             
             <form method="POST">
                 <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
@@ -1029,13 +1319,16 @@ $filter_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY boo
                     <textarea name="notes" placeholder="e.g. First batch for semester"></textarea>
                 </div>
                 
-                <button type="submit" name="record_received" class="btn btn-primary" style="background: linear-gradient(135deg, #17a2b8 0%, #138496 100%);">📦 Record Books Received</button>
+                <button type="submit" name="record_received" class="btn btn-primary" style="background: linear-gradient(135deg, #17a2b8 0%, #138496 100%);">&#128230; Record Books Received</button>
             </form>
         </div>
         
         <!-- Record Payment Form -->
         <div class="card">
-            <h3>💰 Record Payment to Lecturer</h3>
+            <h3 class="section-heading">
+                <span class="mini-icon">&#128176;</span>
+                <span>Record Payment to Lecturer</span>
+            </h3>
             
             <form method="POST">
                 <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
@@ -1057,7 +1350,7 @@ $filter_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY boo
                 </div>
                 
                 <div class="form-group">
-                    <label>Amount Paid (GH₵) *</label>
+                    <label>Amount Paid (GH&#8373;) *</label>
                     <input type="number" step="0.01" name="amount_paid" required placeholder="e.g. 150.00 (use -150.00 to correct)">
                 </div>
                 
@@ -1071,18 +1364,21 @@ $filter_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY boo
                     <textarea name="notes" placeholder="e.g. Paid via MoMo to Dr. Mensah"></textarea>
                 </div>
                 
-                <button type="submit" name="record_payment" class="btn btn-primary">💰 Record Payment</button>
+                <button type="submit" name="record_payment" class="btn btn-primary">&#128176; Record Payment</button>
             </form>
         </div>
     </div>
     
-    <div class="grid-2">
+    <div class="grid-2 recent-grid">
         <!-- Recent Books Received -->
-        <div class="card">
-            <h3>📦 Recent Books Received</h3>
+        <div class="card recent-card">
+            <h3 class="section-heading">
+                <span class="mini-icon">&#128230;</span>
+                <span>Recent Books Received</span>
+            </h3>
             <?php if ($received_result && $received_result->num_rows > 0): ?>
-                <div class="table-container">
-                    <table>
+                <div class="table-container recent-table-container">
+                    <table class="recent-table">
                         <thead>
                             <tr>
                                 <th>Date</th>
@@ -1094,10 +1390,10 @@ $filter_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY boo
                         <tbody>
                             <?php while ($received = $received_result->fetch_assoc()): ?>
                                 <tr>
-                                    <td><?php echo date('M d, Y', strtotime($received['receive_date'])); ?></td>
-                                    <td><?php echo htmlspecialchars($received['book_title']); ?></td>
-                                    <td><?php echo $received['copies_received']; ?></td>
-                                    <td><?php echo htmlspecialchars($received['lecturer_name'] ?: '—'); ?></td>
+                                    <td data-label="Date"><?php echo date('M d, Y', strtotime($received['receive_date'])); ?></td>
+                                    <td data-label="Book"><?php echo htmlspecialchars($received['book_title']); ?></td>
+                                    <td data-label="Copies"><?php echo $received['copies_received']; ?></td>
+                                    <td data-label="Lecturer"><?php echo htmlspecialchars($received['lecturer_name'] ?: '—'); ?></td>
                                 </tr>
                             <?php endwhile; ?>
                         </tbody>
@@ -1109,11 +1405,14 @@ $filter_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY boo
         </div>
         
         <!-- Recent Payments -->
-        <div class="card">
-            <h3>💰 Recent Payments to Lecturers</h3>
+        <div class="card recent-card">
+            <h3 class="section-heading">
+                <span class="mini-icon">&#128176;</span>
+                <span>Recent Payments to Lecturers</span>
+            </h3>
             <?php if ($payments_result && $payments_result->num_rows > 0): ?>
-                <div class="table-container">
-                    <table>
+                <div class="table-container recent-table-container">
+                    <table class="recent-table">
                         <thead>
                             <tr>
                                 <th>Date</th>
@@ -1125,10 +1424,10 @@ $filter_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY boo
                         <tbody>
                             <?php while ($payment = $payments_result->fetch_assoc()): ?>
                                 <tr>
-                                    <td><?php echo date('M d, Y', strtotime($payment['payment_date'])); ?></td>
-                                    <td><?php echo htmlspecialchars($payment['book_title']); ?></td>
-                                    <td><?php echo $payment['copies_paid']; ?></td>
-                                    <td>GH₵ <?php echo number_format($payment['amount_paid'], 2); ?></td>
+                                    <td data-label="Date"><?php echo date('M d, Y', strtotime($payment['payment_date'])); ?></td>
+                                    <td data-label="Book"><?php echo htmlspecialchars($payment['book_title']); ?></td>
+                                    <td data-label="Copies"><?php echo $payment['copies_paid']; ?></td>
+                                    <td data-label="Amount">GH&#8373; <?php echo number_format($payment['amount_paid'], 2); ?></td>
                                 </tr>
                             <?php endwhile; ?>
                         </tbody>
@@ -1142,7 +1441,10 @@ $filter_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY boo
     
     <!-- Book Inventory & Payment Summary -->
     <div class="card">
-        <h3>📊 Book Inventory & Payment Summary</h3>
+        <h3 class="section-heading">
+            <span class="mini-icon">&#128202;</span>
+            <span>Book Inventory & Payment Summary</span>
+        </h3>
         <div class="table-container">
         <table>
             <thead>
@@ -1174,18 +1476,18 @@ $filter_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY boo
                         ?>
                         <tr>
                             <td><strong><a href="lecturer_payments.php?book_id=<?php echo intval($book['book_id']); ?>" style="color: inherit; text-decoration: underline;"><?php echo htmlspecialchars($book['book_title']); ?></a></strong></td>
-                            <td>GH₵ <?php echo number_format($book['price'], 2); ?></td>
+                            <td>GH&#8373; <?php echo number_format($book['price'], 2); ?></td>
                             <td style="color: #17a2b8; font-weight: 600;"><?php echo $received; ?></td>
                             <td style="color: #28a745; font-weight: 600;"><?php echo $sold; ?></td>
                             <td style="color: <?php echo $remaining_raw < 0 ? '#dc3545' : '#666'; ?>; font-weight: 600;">
                                 <?php echo $remaining; ?>
                             </td>
-                            <td style="color: #6f42c1; font-weight: 600;">GH₵ <?php echo number_format($paid_amount, 2); ?></td>
+                            <td style="color: #6f42c1; font-weight: 600;">GH&#8373; <?php echo number_format($paid_amount, 2); ?></td>
                             <td class="<?php echo $unpaid_amount > 0 ? 'stat-danger' : 'stat-positive'; ?>">
                                 <?php if ($is_overpaid): ?>
-                                    Overpaid GH₵ <?php echo number_format(abs($unpaid_amount), 2); ?>
+                                    Overpaid GH&#8373; <?php echo number_format(abs($unpaid_amount), 2); ?>
                                 <?php else: ?>
-                                    GH₵ <?php echo number_format($unpaid_amount, 2); ?>
+                                    GH&#8373; <?php echo number_format($unpaid_amount, 2); ?>
                                 <?php endif; ?>
                             </td>
                             <td style="min-width: 100px;">
@@ -1209,3 +1511,4 @@ $filter_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY boo
 
 </body>
 </html>
+

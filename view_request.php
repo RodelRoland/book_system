@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 session_start();
 if (!isset($_SESSION['admin_logged_in'])) {
     header('Location: admin.php');
@@ -18,13 +18,13 @@ $per_page = 100;
 $offset = ($page - 1) * $per_page;
 
 // Handle marking a balance as returned
-if (isset($_GET['return_balance'], $_GET['request_id'], $_GET['student_id'])) {
-    if (!csrf_validate($_GET['csrf_token'] ?? null)) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['return_balance'], $_POST['request_id'], $_POST['student_id'])) {
+    if (!csrf_validate($_POST['csrf_token'] ?? null)) {
         header("Location: view_request.php?msg=csrf_invalid");
         exit;
     }
-    $request_id = intval($_GET['request_id']);
-    $student_id = intval($_GET['student_id']);
+    $request_id = intval($_POST['request_id'] ?? 0);
+    $student_id = intval($_POST['student_id'] ?? 0);
 
     if ($request_id <= 0 || $student_id <= 0) {
         header("Location: view_request.php?msg=return_failed");
@@ -85,6 +85,12 @@ if (isset($_GET['return_balance'], $_GET['request_id'], $_GET['student_id'])) {
                     throw new RuntimeException('Failed to insert balance return.');
                 }
                 $conn->commit();
+                if (function_exists('book_system_audit_log')) {
+                    book_system_audit_log($conn, 'return_balance', 'request', $request_id, [
+                        'student_id' => $student_id,
+                        'amount' => $amount_sql,
+                    ]);
+                }
                 header("Location: view_request.php?msg=returned&amount=$amount_sql");
                 exit;
             } catch (Throwable $e) {
@@ -354,6 +360,8 @@ $csrf_token = csrf_get_token();
             font-weight: 700;
             text-transform: uppercase;
             text-decoration: none;
+            border: none;
+            cursor: pointer;
         }
         .status-paid { background: #d4edda; color: #155724; }
         .status-unpaid { background: #f8d7da; color: #721c24; }
@@ -387,7 +395,10 @@ $csrf_token = csrf_get_token();
             font-size: 16px;
             transition: all 0.2s;
             margin-right: 5px;
+            border: none;
+            cursor: pointer;
         }
+        .inline-action-form { display: inline; }
         .action-edit { background: #e3f2fd; }
         .action-edit:hover { background: #2196f3; }
         .action-delete { background: #ffebee; }
@@ -494,44 +505,57 @@ $csrf_token = csrf_get_token();
                                         $icon = ($is_collected == 1) ? '<i class="bi bi-check-lg"></i>' : '<i class="bi bi-circle"></i>';
                                         $item_id_int = intval($item_id);
                                         $safe_title_attr = htmlspecialchars($title, ENT_QUOTES);
-                                        echo "<a href='toggle_book_collection.php?item_id={$item_id_int}&csrf_token=" . urlencode($csrf_token) . "' class='book-tag $tagClass' data-title='{$safe_title_attr}'>$icon $title</a>";
-                                    }
-                                }
-                            }
-                            ?>
+                                         echo "<form method='POST' action='toggle_book_collection.php' class='inline-action-form inline-toggle-form'>";
+                                         echo "<input type='hidden' name='csrf_token' value='" . htmlspecialchars($csrf_token, ENT_QUOTES) . "'>";
+                                         echo "<input type='hidden' name='item_id' value='{$item_id_int}'>";
+                                         echo "<button type='submit' class='book-tag {$tagClass}' data-title='{$safe_title_attr}'>$icon $title</button>";
+                                         echo "</form>";
+                                     }
+                                 }
+                             }
+                             ?>
                         </td>
-                        <td><strong>GH₵ <?php echo number_format($row['total_amount'], 2); ?></strong></td>
-                        <td>GH₵ <?php echo number_format($row['amount_paid'], 2); ?></td>
+                        <td><strong>GH&#8373; <?php echo number_format($row['total_amount'], 2); ?></strong></td>
+                        <td>GH&#8373; <?php echo number_format($row['amount_paid'], 2); ?></td>
                         <td>
-                            <a href="toggle_payment.php?request_id=<?php echo $row['request_id']; ?>&csrf_token=<?php echo urlencode($csrf_token); ?>" 
-                               class="status-badge <?php echo ($row['payment_status'] == 'paid') ? 'status-paid' : 'status-unpaid'; ?>">
-                                <?php echo strtoupper($row['payment_status']); ?>
-                            </a>
+                            <form method="POST" action="toggle_payment.php" class="inline-action-form">
+                                <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
+                                <input type="hidden" name="request_id" value="<?php echo intval($row['request_id']); ?>">
+                                <button type="submit" class="status-badge <?php echo ($row['payment_status'] == 'paid') ? 'status-paid' : 'status-unpaid'; ?>">
+                                    <?php echo strtoupper($row['payment_status']); ?>
+                                </button>
+                            </form>
                         </td>
                         <td>
                             <?php if ($refunded_amount > 0): ?>
-                                <div class="credit-amt">Returned: GH₵ <?php echo number_format($refunded_amount, 2); ?></div>
+                                <div class="credit-amt">Returned: GH&#8373; <?php echo number_format($refunded_amount, 2); ?></div>
                                 <?php if (!empty($row['last_return_date'])): ?>
                                     <div class="index" style="margin-top:4px;"><?php echo date('M d, Y', strtotime($row['last_return_date'])); ?></div>
                                 <?php endif; ?>
                             <?php elseif ($debit_amount > 0): ?>
-                                <div class="debit-amt">Owes: GH₵ <?php echo number_format($debit_amount, 2); ?></div>
+                                <div class="debit-amt">Owes: GH&#8373; <?php echo number_format($debit_amount, 2); ?></div>
                             <?php elseif ($cash_overpaid > 0): ?>
-                                <div class="credit-amt">Balance: GH₵ <?php echo number_format($cash_overpaid, 2); ?></div>
+                                <div class="credit-amt">Balance: GH&#8373; <?php echo number_format($cash_overpaid, 2); ?></div>
                             <?php else: ?>
-                                <span class="zero-amt">—</span>
+                                <span class="zero-amt">&mdash;</span>
                             <?php endif; ?>
                         </td>
                         <td>
                             <a href="edit_request.php?id=<?php echo $row['request_id']; ?>" class="action-btn action-edit" title="Edit"><i class="bi bi-pencil-square"></i></a>
                             <?php if ($refunded_amount <= 0 && $overpaid_amount > 0): ?>
-                                <a href="view_request.php?return_balance=1&request_id=<?php echo $row['request_id']; ?>&student_id=<?php echo $row['student_id']; ?>&csrf_token=<?php echo urlencode($csrf_token); ?>" 
-                                   class="action-btn action-return" 
-                                   onclick="return confirm('Mark this balance as returned to the student?');" 
-                                   title="Mark Returned"><i class="bi bi-cash-coin"></i></a>
+                                <form method="POST" class="inline-action-form" onsubmit="return confirm('Mark this balance as returned to the student?');">
+                                    <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
+                                    <input type="hidden" name="return_balance" value="1">
+                                    <input type="hidden" name="request_id" value="<?php echo intval($row['request_id']); ?>">
+                                    <input type="hidden" name="student_id" value="<?php echo intval($row['student_id']); ?>">
+                                    <button type="submit" class="action-btn action-return" title="Mark Returned"><i class="bi bi-cash-coin"></i></button>
+                                </form>
                             <?php endif; ?>
-                            <a href="delete_request.php?id=<?php echo $row['request_id']; ?>&csrf_token=<?php echo urlencode($csrf_token); ?>" class="action-btn action-delete" 
-                               onclick="return confirm('Delete this request?');" title="Delete"><i class="bi bi-trash"></i></a>
+                            <form method="POST" action="delete_request.php" class="inline-action-form" onsubmit="return confirm('Delete this request?');">
+                                <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
+                                <input type="hidden" name="id" value="<?php echo intval($row['request_id']); ?>">
+                                <button type="submit" class="action-btn action-delete" title="Delete"><i class="bi bi-trash"></i></button>
+                            </form>
                         </td>
                     </tr>
                     <?php endwhile; ?>
@@ -570,26 +594,30 @@ $csrf_token = csrf_get_token();
 <script>
 // AJAX toggle for book collection status - prevents page scroll
 document.addEventListener('DOMContentLoaded', function() {
-    document.querySelectorAll('.book-tag').forEach(function(tag) {
-        tag.addEventListener('click', function(e) {
+    document.querySelectorAll('.inline-toggle-form').forEach(function(form) {
+        form.addEventListener('submit', function(e) {
             e.preventDefault();
-            var link = this;
-            var url = link.getAttribute('href') + '&ajax=1';
-            
-            fetch(url)
+            var button = form.querySelector('.book-tag');
+            var data = new FormData(form);
+            data.append('ajax', '1');
+             
+            fetch(form.getAttribute('action'), {
+                method: 'POST',
+                body: data
+            })
                 .then(response => response.json())
                 .then(data => {
                     if (data.success) {
-                        var title = link.getAttribute('data-title') || link.textContent.trim();
+                        var title = button.getAttribute('data-title') || button.textContent.trim();
                         // Update tag appearance
                         if (data.is_collected === 1) {
-                            link.classList.remove('tag-pending');
-                            link.classList.add('tag-collected');
-                            link.innerHTML = '<i class="bi bi-check-lg"></i> ' + title;
+                            button.classList.remove('tag-pending');
+                            button.classList.add('tag-collected');
+                            button.innerHTML = '<i class="bi bi-check-lg"></i> ' + title;
                         } else {
-                            link.classList.remove('tag-collected');
-                            link.classList.add('tag-pending');
-                            link.innerHTML = '<i class="bi bi-circle"></i> ' + title;
+                            button.classList.remove('tag-collected');
+                            button.classList.add('tag-pending');
+                            button.innerHTML = '<i class="bi bi-circle"></i> ' + title;
                         }
                     } else {
                         alert('Failed to toggle: ' + (data.error || 'Unknown error'));
@@ -605,3 +633,5 @@ document.addEventListener('DOMContentLoaded', function() {
 
 </body>
 </html>
+
+

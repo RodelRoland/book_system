@@ -64,6 +64,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $upd->bind_param('iii', $current_admin_id, $new_admin_id, $signup_id);
                         $upd->execute();
 
+                        if (function_exists('book_system_audit_log')) {
+                            book_system_audit_log($conn, 'approve_rep_signup', 'rep_signup', $signup_id, [
+                                'username' => $username,
+                                'full_name' => $full_name,
+                                'class_name' => $class_name,
+                                'created_admin_id' => $new_admin_id,
+                            ], $new_admin_id);
+                        }
+
                         $generated_code = $code;
                         $generated_username = $username;
                         $success_msg = "Payment confirmed. Rep account created. Share the 4-digit first-time code with the rep.";
@@ -75,6 +84,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $upd = $conn->prepare("UPDATE rep_signup_requests SET status = 'rejected', approved_at = NOW(), approved_by_admin_id = ? WHERE signup_id = ?");
                 $upd->bind_param('ii', $current_admin_id, $signup_id);
                 if ($upd->execute()) {
+                    if (function_exists('book_system_audit_log')) {
+                        book_system_audit_log($conn, 'reject_rep_signup', 'rep_signup', $signup_id, [
+                            'username' => strval($req['username'] ?? ''),
+                            'full_name' => strval($req['full_name'] ?? ''),
+                            'class_name' => strval($req['class_name'] ?? ''),
+                        ]);
+                    }
                     $success_msg = 'Request rejected.';
                 } else {
                     $error_msg = 'Failed to reject request.';

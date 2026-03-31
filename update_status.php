@@ -12,13 +12,13 @@ $current_admin_id = intval($_SESSION['admin_id'] ?? 0);
 $current_admin_role = $_SESSION['admin_role'] ?? 'rep';
 $is_super_admin = ($current_admin_role === 'super_admin');
 
-if (isset($_GET['id'])) {
-    if (!csrf_validate($_GET['csrf_token'] ?? null)) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['id'])) {
+    if (!csrf_validate($_POST['csrf_token'] ?? null)) {
         header("Location: view_request.php?msg=csrf_invalid");
         exit;
     }
     // Get the ID from the URL and make sure it's a number
-    $request_id = intval($_GET['id']);
+    $request_id = intval($_POST['id'] ?? 0);
 
     if ($request_id <= 0) {
         header("Location: view_request.php?msg=invalid_request");
@@ -38,6 +38,11 @@ if (isset($_GET['id'])) {
         if (!$is_super_admin && $stmt->affected_rows !== 1) {
             header("Location: view_request.php?msg=unauthorized");
             exit;
+        }
+        if (function_exists('book_system_audit_log')) {
+            book_system_audit_log($conn, 'mark_paid', 'request', $request_id, [
+                'payment_status' => 'paid',
+            ]);
         }
         // Go back to the view requests page with a success message
         header("Location: view_request.php?msg=paid_success");

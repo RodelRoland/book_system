@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 session_start();
 require_once 'db.php';
 
@@ -15,8 +15,8 @@ if (($_SESSION['admin_role'] ?? '') === 'super_admin') {
 }
 
 // Handle Logout
-if (isset($_GET['logout'])) {
-    if (!csrf_validate($_GET['csrf_token'] ?? null)) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['logout'])) {
+    if (!csrf_validate($_POST['csrf_token'] ?? null)) {
         header('Location: rep_dashboard.php?msg=csrf_invalid');
         exit;
     }
@@ -83,8 +83,42 @@ if ($stmt) {
 // Get rep's unique order link
 $rep_username = $_SESSION['admin_username'] ?? '';
 $order_link = "index.php?rep=" . urlencode($rep_username);
+$request_scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+$request_host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+$request_dir = rtrim(str_replace('\\', '/', dirname($_SERVER['PHP_SELF'] ?? '/book_system/rep_dashboard.php')), '/');
+$public_order_link = $request_scheme . '://' . $request_host . ($request_dir !== '' ? $request_dir : '') . '/' . $order_link;
 
 $csrf_token = csrf_get_token();
+$dashboard_metrics = function_exists('book_system_get_dashboard_metrics')
+    ? book_system_get_dashboard_metrics($conn, $semester_id, $current_admin_id)
+    : [];
+$dashboard_alerts = function_exists('book_system_get_dashboard_alerts')
+    ? book_system_get_dashboard_alerts($conn, $semester_id, $current_admin_id)
+    : [];
+$semester_chart_rows = function_exists('book_system_get_semester_chart_data')
+    ? book_system_get_semester_chart_data($conn, 6, $current_admin_id)
+    : [];
+$recent_activity = function_exists('book_system_fetch_recent_activity')
+    ? book_system_fetch_recent_activity($conn, 8, $current_admin_id, false)
+    : [];
+
+if (!empty($dashboard_metrics)) {
+    $total_collected = floatval($dashboard_metrics['cash_collected'] ?? $dashboard_metrics['paid_revenue'] ?? $total_collected);
+    $paid_to_lecturers = floatval($dashboard_metrics['lecturer_paid'] ?? $paid_to_lecturers);
+    $net_balance = floatval($dashboard_metrics['available_balance'] ?? ($total_collected - $paid_to_lecturers));
+    $total_pending = intval($dashboard_metrics['unpaid_requests'] ?? $total_pending);
+}
+
+$chart_max_value = 1;
+foreach ($semester_chart_rows as $chart_row) {
+    $chart_max_value = max(
+        $chart_max_value,
+        floatval($chart_row['revenue'] ?? 0),
+        floatval($chart_row['unpaid_balance'] ?? 0),
+        intval($chart_row['collected_items'] ?? 0),
+        intval($chart_row['pending_items'] ?? 0)
+    );
+}
 ?>
 
 <!DOCTYPE html>
@@ -205,6 +239,98 @@ $csrf_token = csrf_get_token();
             padding: 25px;
             box-shadow: 0 4px 15px rgba(0,0,0,0.08);
         }
+        .overview-grid {
+            display: grid;
+            grid-template-columns: 1.35fr 1fr;
+            gap: 16px;
+            margin-bottom: 20px;
+        }
+        .panel {
+            background: white;
+            border-radius: 16px;
+            padding: 20px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+        }
+        .panel-wide { grid-column: 1 / -1; }
+        .panel h2 {
+            font-size: 16px;
+            color: #1f2937;
+            margin-bottom: 14px;
+        }
+        .chart-group { margin-bottom: 16px; }
+        .chart-group:last-child { margin-bottom: 0; }
+        .chart-label {
+            display: flex;
+            justify-content: space-between;
+            gap: 10px;
+            font-size: 12px;
+            color: #4b5563;
+            margin-bottom: 6px;
+            font-weight: 600;
+        }
+        .chart-track {
+            height: 10px;
+            background: #e5e7eb;
+            border-radius: 999px;
+            overflow: hidden;
+            margin-bottom: 8px;
+        }
+        .chart-fill {
+            height: 100%;
+            border-radius: 999px;
+        }
+        .chart-fill.revenue { background: linear-gradient(135deg, #34d399 0%, #059669 100%); }
+        .chart-fill.unpaid { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); }
+        .chart-fill.collected { background: linear-gradient(135deg, #60a5fa 0%, #2563eb 100%); }
+        .chart-fill.pending { background: linear-gradient(135deg, #f87171 0%, #dc2626 100%); }
+        .alert-list {
+            display: grid;
+            gap: 10px;
+        }
+        .alert-banner {
+            padding: 12px 14px;
+            border-radius: 12px;
+            font-size: 13px;
+            font-weight: 600;
+        }
+        .alert-warning { background: #fff7ed; color: #9a3412; border-left: 4px solid #f59e0b; }
+        .alert-info { background: #eff6ff; color: #1d4ed8; border-left: 4px solid #3b82f6; }
+        .alert-danger { background: #fef2f2; color: #b91c1c; border-left: 4px solid #ef4444; }
+        .empty-note {
+            background: #f8fafc;
+            color: #64748b;
+            padding: 14px;
+            border-radius: 12px;
+            font-size: 13px;
+        }
+        .activity-list {
+            display: grid;
+            gap: 10px;
+        }
+        .activity-item {
+            padding: 12px 14px;
+            border-radius: 12px;
+            background: #f8fafc;
+            border: 1px solid #e5e7eb;
+        }
+        .activity-item .title {
+            font-weight: 700;
+            color: #1f2937;
+            font-size: 14px;
+        }
+        .activity-item .meta {
+            font-size: 12px;
+            color: #64748b;
+            margin-top: 4px;
+        }
+        .activity-item .details {
+            font-size: 12px;
+            color: #475569;
+            margin-top: 6px;
+        }
+        @media (max-width: 760px) {
+            .overview-grid { grid-template-columns: 1fr; }
+        }
         .menu-section h2 {
             font-size: 16px;
             color: #333;
@@ -238,15 +364,16 @@ $csrf_token = csrf_get_token();
             background: #e8f5e9;
         }
         .menu-item .icon {
-            width: 45px;
-            height: 45px;
-            border-radius: 10px;
+            width: 56px;
+            height: 56px;
+            border-radius: 15px;
             display: flex;
             align-items: center;
             justify-content: center;
-            font-size: 22px;
+            font-size: 26px;
             margin-right: 12px;
             background: #e8f5e9;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.75), 0 8px 18px rgba(15, 23, 42, 0.08);
         }
         .menu-item .text h3 { font-size: 14px; font-weight: 600; margin-bottom: 2px; }
         .menu-item .text p { font-size: 11px; color: #888; }
@@ -267,16 +394,19 @@ $csrf_token = csrf_get_token();
 
 <div class="dashboard-container">
     <div class="dashboard-header">
-        <h1>👋 Welcome, <?php echo htmlspecialchars($current_admin_name); ?></h1>
-        <p class="subtitle">📋 <?php echo htmlspecialchars($current_admin_class ?: 'Class Representative'); ?><?php echo $active_semester_name ? ' • ' . htmlspecialchars($active_semester_name) : ''; ?></p>
+        <h1>Welcome, <?php echo htmlspecialchars($current_admin_name); ?></h1>
+        <p class="subtitle">Class: <?php echo htmlspecialchars($current_admin_class ?: 'Class Representative'); ?><?php echo $active_semester_name ? ' &bull; ' . htmlspecialchars($active_semester_name) : ''; ?></p>
         
         <div class="header-actions">
             <div class="order-link-box">
-                <span>📎 Your Order Link:</span>
-                <code id="orderLink"><?php echo htmlspecialchars($order_link); ?></code>
+                <span>&#128279; Your Order Link:</span>
+                <code id="orderLink"><?php echo htmlspecialchars($public_order_link); ?></code>
                 <button class="copy-btn" onclick="copyLink()">Copy</button>
             </div>
-            <a href="?logout=1&csrf_token=<?php echo urlencode($csrf_token); ?>" class="logout-btn">Logout</a>
+            <form method="POST" style="margin:0;">
+                <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
+                <button type="submit" name="logout" value="1" class="logout-btn">Logout</button>
+            </form>
         </div>
     </div>
     
@@ -286,19 +416,19 @@ $csrf_token = csrf_get_token();
     
     <div class="stats-grid">
         <div class="stat-card">
-            <div class="label">💰 Total Collected</div>
-            <div class="value">GH₵ <?php echo number_format($total_collected, 2); ?></div>
+            <div class="label">Cash Collected</div>
+            <div class="value">GH&#8373; <?php echo number_format($total_collected, 2); ?></div>
         </div>
         <div class="stat-card blue">
-            <div class="label">📤 Paid to Lecturers</div>
-            <div class="value">GH₵ <?php echo number_format($paid_to_lecturers, 2); ?></div>
+            <div class="label">Paid to Lecturers</div>
+            <div class="value">GH&#8373; <?php echo number_format($paid_to_lecturers, 2); ?></div>
         </div>
         <div class="stat-card orange">
-            <div class="label">💵 Your Balance</div>
-            <div class="value">GH₵ <?php echo number_format($net_balance, 2); ?></div>
+            <div class="label">Available Balance</div>
+            <div class="value">GH&#8373; <?php echo number_format($net_balance, 2); ?></div>
         </div>
         <div class="stat-card red">
-            <div class="label">⏳ Unpaid Requests</div>
+            <div class="label">Unpaid Requests</div>
             <div class="value"><?php echo $total_pending; ?></div>
         </div>
     </div>
@@ -307,49 +437,56 @@ $csrf_token = csrf_get_token();
         <h2>Quick Actions</h2>
         <div class="menu-grid">
             <a href="view_request.php" class="menu-item">
-                <div class="icon">📩</div>
+                <div class="icon">&#128228;</div>
                 <div class="text">
                     <h3>View Requests</h3>
                     <p>Student orders & payments</p>
                 </div>
             </a>
             <a href="manage_books.php" class="menu-item">
-                <div class="icon">📚</div>
+                <div class="icon">&#128218;</div>
                 <div class="text">
                     <h3>Manage Books</h3>
                     <p>Add, edit prices & availability</p>
                 </div>
             </a>
             <a href="lecturer_payments.php" class="menu-item">
-                <div class="icon">💰</div>
+                <div class="icon">&#128176;</div>
                 <div class="text">
                     <h3>Lecturer Payments</h3>
                     <p>Track payments to lecturers</p>
                 </div>
             </a>
             <a href="admin_manual_order.php" class="menu-item">
-                <div class="icon">➕</div>
+                <div class="icon">&#10133;</div>
                 <div class="text">
                     <h3>Manual Order</h3>
                     <p>Record cash payments</p>
                 </div>
             </a>
             <a href="upload_class.php" class="menu-item">
-                <div class="icon">📋</div>
+                <div class="icon">&#128203;</div>
                 <div class="text">
                     <h3>Upload Class</h3>
                     <p>Import your class roster</p>
                 </div>
             </a>
             <a href="my_profile.php" class="menu-item">
-                <div class="icon">👤</div>
+                <div class="icon">&#128100;</div>
                 <div class="text">
                     <h3>My Profile</h3>
                     <p>Update payment details</p>
                 </div>
             </a>
+            <a href="activity_log.php" class="menu-item">
+                <div class="icon">&#128221;</div>
+                <div class="text">
+                    <h3>Activity Log</h3>
+                    <p>Review your recent request and payment changes</p>
+                </div>
+            </a>
             <a href="generate_access_code.php" class="menu-item">
-                <div class="icon">🔐</div>
+                <div class="icon">&#128274;</div>
                 <div class="text">
                     <h3>Access Code</h3>
                     <p>Generate code for super admin</p>
@@ -361,13 +498,11 @@ $csrf_token = csrf_get_token();
 
 <script>
 function copyLink() {
-    const link = window.location.origin + window.location.pathname.replace('rep_dashboard.php', '') + document.getElementById('orderLink').textContent;
+    const link = document.getElementById('orderLink').textContent.trim();
     navigator.clipboard.writeText(link).then(() => {
         alert('Order link copied to clipboard!');
     }).catch(() => {
-        // Fallback
-        const text = document.getElementById('orderLink').textContent;
-        prompt('Copy this link:', window.location.origin + window.location.pathname.replace('rep_dashboard.php', '') + text);
+        prompt('Copy this link:', link);
     });
 }
 </script>
@@ -376,3 +511,4 @@ function copyLink() {
 
 </body>
 </html>
+

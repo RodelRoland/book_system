@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 session_start();
 require_once 'db.php';
 
@@ -57,6 +57,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['upload_csv'])) {
             fclose($handle);
             
             if ($imported_count > 0) {
+                if (function_exists('book_system_audit_log')) {
+                    book_system_audit_log($conn, 'upload_class_csv', 'class_students', $current_admin_id, [
+                        'imported_count' => $imported_count,
+                        'skipped_count' => $skipped_count,
+                    ], $current_admin_id);
+                }
                 $success_msg = "Successfully imported/updated $imported_count students.";
                 if ($skipped_count > 0) {
                     $success_msg .= " Skipped $skipped_count invalid rows.";
@@ -69,7 +75,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['upload_csv'])) {
         }
     } else {
         $error_msg = "Please select a valid CSV file to upload.";
-    }
     }
 }
 
@@ -85,6 +90,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_student'])) {
         $stmt = $conn->prepare("INSERT INTO class_students (admin_id, index_number, student_name) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE student_name = VALUES(student_name)");
         $stmt->bind_param("iss", $current_admin_id, $index_number, $student_name);
         if ($stmt->execute()) {
+            if (function_exists('book_system_audit_log')) {
+                book_system_audit_log($conn, 'add_class_student', 'class_students', intval($stmt->insert_id), [
+                    'index_number' => $index_number,
+                    'student_name' => $student_name,
+                ], $current_admin_id);
+            }
             $success_msg = "Student added/updated successfully.";
         } else {
             $error_msg = "Error adding student: " . $conn->error;
@@ -105,6 +116,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_student'])) {
         $stmt = $conn->prepare("DELETE FROM class_students WHERE id = ? AND admin_id = ?");
         $stmt->bind_param("ii", $id, $current_admin_id);
         if ($stmt->execute()) {
+            if (function_exists('book_system_audit_log')) {
+                book_system_audit_log($conn, 'delete_class_student', 'class_students', $id, [], $current_admin_id);
+            }
             $success_msg = "Student removed from class list.";
         } else {
             $error_msg = "Error removing student.";
@@ -121,6 +135,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['clear_all'])) {
     $stmt = $conn->prepare("DELETE FROM class_students WHERE admin_id = ?");
     $stmt->bind_param("i", $current_admin_id);
     if ($stmt->execute()) {
+        if (function_exists('book_system_audit_log')) {
+            book_system_audit_log($conn, 'clear_class_students', 'class_students', $current_admin_id, [], $current_admin_id);
+        }
         $success_msg = "All students cleared from your class list.";
     } else {
         $error_msg = "Error clearing class list.";
@@ -185,6 +202,24 @@ if ($cnt) {
             justify-content: space-between;
             align-items: center;
             box-shadow: 0 10px 30px rgba(102, 126, 234, 0.3);
+        }
+        .title-row {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            flex-wrap: wrap;
+        }
+        .title-icon {
+            width: 52px;
+            height: 52px;
+            border-radius: 16px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            background: rgba(255,255,255,0.18);
+            border: 1px solid rgba(255,255,255,0.28);
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.18);
         }
         .header h1 { font-size: 24px; }
         .header .subtitle { opacity: 0.9; font-size: 14px; margin-top: 5px; }
@@ -310,18 +345,47 @@ if ($cnt) {
             margin-top: 15px;
         }
         .csv-format code { background: #e9ecef; padding: 2px 6px; border-radius: 4px; }
+        .preview-box {
+            margin-top: 18px;
+            text-align: left;
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 10px;
+            padding: 14px;
+            display: none;
+        }
+        .preview-box h4 {
+            margin-bottom: 8px;
+            color: #1f2937;
+            font-size: 14px;
+        }
+        .preview-summary {
+            font-size: 13px;
+            color: #475569;
+            margin-bottom: 10px;
+        }
+        .preview-table {
+            width: 100%;
+            font-size: 12px;
+        }
+        .preview-valid { color: #166534; font-weight: 700; }
+        .preview-invalid { color: #b91c1c; font-weight: 700; }
     </style>
 </head>
 <body>
 <div class="container">
     <div class="header">
         <div>
-            <h1>📋 Upload Class Data</h1>
-            <p class="subtitle">Import your class roster to enable auto-fill for student names</p>
+            <div class="title-row">
+                <span class="title-icon">&#128203;</span>
+                <div>
+                    <h1>Upload Class Data</h1>
+                    <p class="subtitle">Import your class roster to enable auto-fill for student names</p>
+                </div>
+            </div>
         </div>
-        <a href="admin.php" class="back-btn">← Back to Dashboard</a>
-    </div>input type="hiden" name="csrf_token" value="<?php echo htmlspecalchars($csrf_token); ?>">
-                    <di
+        <a href="admin.php" class="back-btn">&larr; Back to Dashboard</a>
+    </div>
     
     <?php if ($success_msg): ?>
         <div class="alert alert-success"><?php echo htmlspecialchars($success_msg); ?></div>
@@ -334,36 +398,51 @@ if ($cnt) {
         <h2>Import Students</h2>
         <div class="upload-section">
             <div class="upload-box">
-                <h3 style="margin-bottom: 15px; color: #333;">📁 Upload CSV File</h3>
+                <h3 style="margin-bottom: 15px; color: #333;">&#128194; Upload CSV File</h3>
                 <form method="POST" enctype="multipart/form-data">
+                    <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
                     <div class="form-group">
-                        <input type="file" name="csv_file" accept=".csv,.txt" required>
+                        <input type="file" id="csv_file" name="csv_file" accept=".csv,.txt" required>
                     </div>
-                    <label class="">
-                    <input type="hidden" name=ccsrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>"heckbox-label">
-                        <input type="checkbox" name="skip_header" checked>
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="skip_header" name="skip_header" checked>
                         Skip first row (header)
                     </label>
-                    <button type="submit" name="upload_csv" class="btn btn-primary">Upload CSV</button>
+                    <button type="submit" id="upload_csv_btn" name="upload_csv" class="btn btn-primary">Upload CSV</button>
                 </form>
                 <div class="csv-format">
                     <strong>CSV Format:</strong><br>
                     <code>index_number, student_name</code><br>
-                    Example: <code>PS/CSC/21/0001, John Doe</code>
+                    Example: <code>PS/CSC/21/0001, Roland Kitsi</code>
+                </div>
+                <div id="csv_preview_box" class="preview-box">
+                    <h4>CSV Validation Preview</h4>
+                    <div id="csv_preview_summary" class="preview-summary"></div>
+                    <table class="preview-table">
+                        <thead>
+                            <tr>
+                                <th>Row</th>
+                                <th>Index Number</th>
+                                <th>Student Name</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="csv_preview_body"></tbody>
+                    </table>
                 </div>
             </div>
             
             <div class="upload-box">
-                <h3 style="margin-bottom: 15px; color: #333;">➕ Add Single Student</h3>
+                <h3 style="margin-bottom: 15px; color: #333;">&#10133; Add Single Student</h3>
                 <form method="POST">
+                    <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
                     <div class="form-group">
                         <label>Index Number</label>
                         <input type="text" name="index_number" placeholder="e.g., PS/CSC/21/0001" required>
                     </div>
                     <div class="form-group">
-                        <label>Student Name</label>);">
-                <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token ?>
-                        <input type="text" name="student_name" placeholder="e.g., John Doe" required>
+                        <label>Student Name</label>
+                        <input type="text" name="student_name" placeholder="e.g., Roland Kitsi" required>
                     </div>
                     <button type="submit" name="add_student" class="btn btn-success">Add Student</button>
                 </form>
@@ -375,10 +454,11 @@ if ($cnt) {
         <h2>Your Class Roster</h2>
         
         <div class="stats-row">
-            <span class="stat-badge">📊 Total Students: <?php echo $total_students; ?></span>
+            <span class="stat-badge">&#128202; Total Students: <?php echo $total_students; ?></span>
             <?php if ($total_students > 0): ?>
             <form method="POST" style="display: inline;" onsubmit="return confirm('Are you sure you want to clear ALL students from your class list?');">
-                <button type="submit" name="clear_all" class="btn btn-danger btn-sm">🗑️ Clear All</button>
+                <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
+                <button type="submit" name="clear_all" class="btn btn-danger btn-sm">&#128465; Clear All</button>
             </form>
             <?php endif; ?>
         </div>
@@ -391,8 +471,7 @@ if ($cnt) {
             <?php endif; ?>
         </form>
         
-        <?php if ($students_result && $students_result->num_rows > 0): ?>);">
-                            <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token ?>
+        <?php if ($students_result && $students_result->num_rows > 0): ?>
         <table>
             <thead>
                 <tr>
@@ -408,6 +487,7 @@ if ($cnt) {
                     <td><?php echo htmlspecialchars($student['student_name']); ?></td>
                     <td>
                         <form method="POST" style="display: inline;" onsubmit="return confirm('Remove this student?');">
+                            <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
                             <input type="hidden" name="student_id" value="<?php echo $student['id']; ?>">
                             <button type="submit" name="delete_student" class="btn btn-danger btn-sm">Remove</button>
                         </form>
@@ -425,5 +505,101 @@ if ($cnt) {
 </div>
 
 <?php include 'footer.php'; ?>
+<script>
+function parseCsvLine(line) {
+    var values = [];
+    var current = '';
+    var inQuotes = false;
+
+    for (var i = 0; i < line.length; i++) {
+        var char = line[i];
+        if (char === '"') {
+            if (inQuotes && line[i + 1] === '"') {
+                current += '"';
+                i++;
+            } else {
+                inQuotes = !inQuotes;
+            }
+        } else if (char === ',' && !inQuotes) {
+            values.push(current.trim());
+            current = '';
+        } else {
+            current += char;
+        }
+    }
+
+    values.push(current.trim());
+    return values;
+}
+
+function renderCsvPreview() {
+    var input = document.getElementById('csv_file');
+    var skipHeader = document.getElementById('skip_header');
+    var previewBox = document.getElementById('csv_preview_box');
+    var previewBody = document.getElementById('csv_preview_body');
+    var previewSummary = document.getElementById('csv_preview_summary');
+    var uploadButton = document.getElementById('upload_csv_btn');
+
+    previewBody.innerHTML = '';
+    previewSummary.textContent = '';
+    previewBox.style.display = 'none';
+    uploadButton.disabled = false;
+
+    if (!input || !input.files || !input.files[0]) {
+        return;
+    }
+
+    var reader = new FileReader();
+    reader.onload = function(event) {
+        var text = String(event.target.result || '').replace(/\r/g, '');
+        var rawLines = text.split('\n').filter(function(line) {
+            return line.trim() !== '';
+        });
+        var lines = skipHeader.checked ? rawLines.slice(1) : rawLines.slice();
+        var validCount = 0;
+        var invalidCount = 0;
+        var previewLimit = 8;
+
+        lines.forEach(function(line, index) {
+            var columns = parseCsvLine(line);
+            var indexNumber = (columns[0] || '').trim();
+            var studentName = (columns[1] || '').trim();
+            var isValid = indexNumber !== '' && studentName !== '';
+
+            if (isValid) {
+                validCount++;
+            } else {
+                invalidCount++;
+            }
+
+            if (index < previewLimit) {
+                var row = document.createElement('tr');
+                row.innerHTML =
+                    '<td>' + (skipHeader.checked ? index + 2 : index + 1) + '</td>' +
+                    '<td>' + indexNumber.replace(/</g, '&lt;') + '</td>' +
+                    '<td>' + studentName.replace(/</g, '&lt;') + '</td>' +
+                    '<td class="' + (isValid ? 'preview-valid' : 'preview-invalid') + '">' + (isValid ? 'Valid' : 'Missing data') + '</td>';
+                previewBody.appendChild(row);
+            }
+        });
+
+        if (lines.length > previewLimit) {
+            var moreRow = document.createElement('tr');
+            moreRow.innerHTML = '<td colspan="4">Preview limited to the first ' + previewLimit + ' data rows.</td>';
+            previewBody.appendChild(moreRow);
+        }
+
+        previewSummary.textContent = validCount + ' valid row(s), ' + invalidCount + ' invalid row(s) detected.';
+        previewBox.style.display = 'block';
+        uploadButton.disabled = (validCount === 0);
+    };
+
+    reader.readAsText(input.files[0]);
+}
+
+document.getElementById('csv_file').addEventListener('change', renderCsvPreview);
+document.getElementById('skip_header').addEventListener('change', renderCsvPreview);
+</script>
 </body>
 </html>
+

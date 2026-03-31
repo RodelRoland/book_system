@@ -15,9 +15,9 @@ $current_admin_id = intval($_SESSION['admin_id'] ?? 0);
 $current_admin_role = $_SESSION['admin_role'] ?? 'rep';
 $is_super_admin = ($current_admin_role === 'super_admin');
 
-if(isset($_GET['item_id'])) {
-    if (!csrf_validate($_GET['csrf_token'] ?? null)) {
-        if (isset($_GET['ajax'])) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['item_id'])) {
+    if (!csrf_validate($_POST['csrf_token'] ?? null)) {
+        if (isset($_POST['ajax'])) {
             header('Content-Type: application/json');
             echo json_encode(['success' => false, 'error' => 'CSRF invalid']);
             exit;
@@ -25,10 +25,10 @@ if(isset($_GET['item_id'])) {
         header("Location: view_request.php?msg=csrf_invalid");
         exit;
     }
-    $item_id = intval($_GET['item_id']);
+    $item_id = intval($_POST['item_id'] ?? 0);
 
     if ($item_id <= 0) {
-        if (isset($_GET['ajax'])) {
+        if (isset($_POST['ajax'])) {
             header('Content-Type: application/json');
             echo json_encode(['success' => false, 'error' => 'Invalid item']);
             exit;
@@ -89,7 +89,7 @@ if(isset($_GET['item_id'])) {
     }
 
     if (!$result) {
-        if (isset($_GET['ajax'])) {
+        if (isset($_POST['ajax'])) {
             header('Content-Type: application/json');
             echo json_encode(['success' => false, 'error' => 'Toggle failed']);
             exit;
@@ -124,7 +124,13 @@ if(isset($_GET['item_id'])) {
         $new_status = intval($status_result->fetch_assoc()['is_collected']);
     }
 
-    if (isset($_GET['ajax'])) {
+    if (function_exists('book_system_audit_log')) {
+        book_system_audit_log($conn, 'toggle_collection', 'request_item', $item_id, [
+            'is_collected' => $new_status,
+        ]);
+    }
+
+    if (isset($_POST['ajax'])) {
         header('Content-Type: application/json');
         echo json_encode(['success' => true, 'is_collected' => $new_status]);
         exit;

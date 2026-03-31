@@ -2,6 +2,12 @@
 session_start();
 error_reporting(0);
 require_once 'db.php';
+if (file_exists(__DIR__ . '/setup_tasks.php')) {
+    require_once __DIR__ . '/setup_tasks.php';
+    if (function_exists('book_system_setup_ensure_column')) {
+        book_system_setup_ensure_column($conn, 'lecturers', 'teaching_level', 'VARCHAR(10) NULL AFTER full_name');
+    }
+}
 
 if (isset($_SESSION['lecturer_logged_in']) && intval($_SESSION['lecturer_logged_in']) === 1) {
     header('Location: lecturer_dashboard.php');
@@ -23,7 +29,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $username = trim($_POST['username'] ?? '');
         $password = $_POST['password'] ?? '';
 
-        $stmt = $conn->prepare("SELECT lecturer_id, username, password_hash, full_name, is_active FROM lecturers WHERE username = ? LIMIT 1");
+        $stmt = $conn->prepare("SELECT lecturer_id, username, password_hash, full_name, teaching_level, is_active FROM lecturers WHERE username = ? LIMIT 1");
         if ($stmt) {
             $stmt->bind_param('s', $username);
             $stmt->execute();
@@ -42,6 +48,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $_SESSION['lecturer_id'] = intval($lecturer['lecturer_id']);
                 $_SESSION['lecturer_username'] = $lecturer['username'];
                 $_SESSION['lecturer_full_name'] = $lecturer['full_name'];
+                $_SESSION['lecturer_teaching_level'] = function_exists('book_system_normalize_teaching_level')
+                    ? book_system_normalize_teaching_level($lecturer['teaching_level'] ?? '')
+                    : preg_replace('/[^0-9]/', '', strval($lecturer['teaching_level'] ?? ''));
 
                 header('Location: lecturer_dashboard.php');
                 exit;

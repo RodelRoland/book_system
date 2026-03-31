@@ -23,37 +23,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!csrf_validate($_POST['csrf_token'] ?? null)) {
         $error_msg = 'Invalid request. Please refresh and try again.';
     } else {
-    $username = substr(trim($_POST['username'] ?? ''), 0, 50);
-    $full_name = substr(trim($_POST['full_name'] ?? ''), 0, 30);
-    $class_name = substr(trim($_POST['class_name'] ?? ''), 0, 30);
+        $username = substr(trim($_POST['username'] ?? ''), 0, 50);
+        $full_name = substr(trim($_POST['full_name'] ?? ''), 0, 30);
+        $class_name = substr(trim($_POST['class_name'] ?? ''), 0, 30);
 
-    if ($username === '' || $full_name === '') {
-        $error_msg = 'Username and full name are required.';
-    } else {
-        $check = $conn->prepare("SELECT admin_id FROM admins WHERE username = ? LIMIT 1");
-        $check->bind_param('s', $username);
-        $check->execute();
-        $exists_admin = $check->get_result()->num_rows > 0;
-
-        $check2 = $conn->prepare("SELECT signup_id FROM rep_signup_requests WHERE username = ? LIMIT 1");
-        $check2->bind_param('s', $username);
-        $check2->execute();
-        $exists_signup = $check2->get_result()->num_rows > 0;
-
-        if ($exists_admin) {
-            $error_msg = "Username already exists. Please choose a different username.";
-        } elseif ($exists_signup) {
-            $error_msg = "A signup request with this username already exists. Please wait for approval or contact the super admin.";
+        if ($username === '' || $full_name === '') {
+            $error_msg = 'Username and full name are required.';
         } else {
-            $stmt = $conn->prepare("INSERT INTO rep_signup_requests (username, full_name, class_name, status) VALUES (?, ?, ?, 'pending')");
-            $stmt->bind_param('sss', $username, $full_name, $class_name);
-            if ($stmt->execute()) {
-                $success_msg = "Signup request submitted successfully. Please make payment to the super admin and wait for approval.";
+            $check = $conn->prepare("SELECT admin_id FROM admins WHERE username = ? LIMIT 1");
+            $check->bind_param('s', $username);
+            $check->execute();
+            $exists_admin = $check->get_result()->num_rows > 0;
+
+            $check2 = $conn->prepare("SELECT signup_id FROM rep_signup_requests WHERE username = ? LIMIT 1");
+            $check2->bind_param('s', $username);
+            $check2->execute();
+            $exists_signup = $check2->get_result()->num_rows > 0;
+
+            if ($exists_admin) {
+                $error_msg = "Username already exists. Please choose a different username.";
+            } elseif ($exists_signup) {
+                $error_msg = "A signup request with this username already exists. Please wait for approval or contact the super admin.";
             } else {
-                $error_msg = "Failed to submit signup request. Please try again.";
+                $stmt = $conn->prepare("INSERT INTO rep_signup_requests (username, full_name, class_name, status) VALUES (?, ?, ?, 'pending')");
+                $stmt->bind_param('sss', $username, $full_name, $class_name);
+                if ($stmt->execute()) {
+                    $success_msg = "Signup request submitted successfully. Please make payment to the super admin and wait for approval.";
+                } else {
+                    $error_msg = "Failed to submit signup request. Please try again.";
+                }
             }
         }
-    }
     }
 }
 ?>
@@ -173,7 +173,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             letter-spacing: 0.3px;
         }
         .btn:hover { opacity: 0.95; }
-        .note { color: #666; font-size: 14px; line-height: 1.6; }
         .kicker {
             display: inline-flex;
             align-items: center;
@@ -261,13 +260,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <div class="container">
     <div class="header">
         <div>
-            <div class="kicker">🚀 Rep Onboarding</div>
+            <div class="kicker">&#128640; Rep Onboarding</div>
             <div class="hero-title" style="margin-top: 10px;">
                 <h1>Become a Class Rep</h1>
                 <p class="subtitle">Submit your request and pay via <strong>MoMo</strong> to get your <strong>4-digit first-time code</strong>.</p>
             </div>
         </div>
-        <a href="login.php" class="back-btn">← Back</a>
+        <a href="login.php" class="back-btn">&larr; Back</a>
     </div>
 
     <?php if ($success_msg): ?>
@@ -297,7 +296,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         <input type="text" name="class_name" placeholder="e.g. HND 1 A">
                     </div>
                     <button type="submit" class="btn">Submit Request</button>
-                    <div class="muted" style="margin-top: 10px;">Tip: After payment, wait for super admin approval. You’ll receive a 4-digit code to set your password.</div>
+                    <div class="muted" style="margin-top: 10px;">Tip: After payment, wait for super admin approval. You will receive a 4-digit code to set your password.</div>
                 </form>
             </div>
 
@@ -322,18 +321,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         <div class="num">3</div>
                         <div>
                             <div class="title">Get your first-time code</div>
-                            <div class="desc">After confirmation, you’ll receive a 4-digit code to set your password.</div>
+                            <div class="desc">After confirmation, you will receive a 4-digit code to set your password.</div>
                         </div>
                     </div>
                 </div>
-                <a class="small-link" href="rep_first_time_reset.php">Go to First-Time Code Reset →</a>
+                <a class="small-link" href="rep_first_time_reset.php">Go to First-Time Code Reset &rarr;</a>
             </div>
         </div>
 
         <div>
             <div class="card" style="border: 1px solid rgba(34,197,94,0.25);">
                 <h3 style="margin-bottom: 6px; font-weight: 950;">Payment Details (MoMo)</h3>
-                <div class="muted">Use these details to complete payment. Once approved, you’ll be able to set your password and access the system.</div>
+                <div class="muted">Use these details to complete payment. Once approved, you will be able to set your password and access the system.</div>
 
                 <div class="pay-hero">
                     <h4>Pay To</h4>

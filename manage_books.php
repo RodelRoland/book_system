@@ -113,6 +113,15 @@ if (isset($_POST['add_book'])) {
     $stmt->bind_param("sdis", $title, $price, $stock_quantity, $availability);
     $stmt->execute();
     $new_book_id = $conn->insert_id;
+
+    if (function_exists('book_system_audit_log') && $new_book_id > 0) {
+        book_system_audit_log($conn, 'add_book', 'book', $new_book_id, [
+            'book_title' => $title,
+            'price' => $price,
+            'stock_quantity' => $stock_quantity,
+            'availability' => $availability,
+        ]);
+    }
     
     if (function_exists('clear_books_cache')) clear_books_cache();
     
@@ -206,6 +215,19 @@ if (isset($_POST['update_book'])) {
         $result = auto_assign_book_to_students_with_balance($conn, $book_id, $price, $semester_id);
         $auto_assigned_count = $result['count'];
         $auto_assigned_total = $result['total'];
+    }
+
+    if (function_exists('book_system_audit_log')) {
+        book_system_audit_log($conn, 'update_book', 'book', $book_id, [
+            'old_price' => $old_price,
+            'new_price' => $price,
+            'stock_quantity' => $stock_quantity,
+            'availability' => $availability,
+            'effective_date' => $effective_date,
+            'scheduled_change' => $schedule_price_change,
+            'auto_assigned_count' => $auto_assigned_count,
+            'auto_assigned_total' => $auto_assigned_total,
+        ]);
     }
 }
 
