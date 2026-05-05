@@ -1,15 +1,33 @@
-<?php
-session_start();
+﻿<?php
+require_once __DIR__ . '/security_bootstrap.php';
+book_system_secure_session_start();
 require_once 'db.php';
+if (file_exists(__DIR__ . '/setup_tasks.php')) {
+    require_once __DIR__ . '/setup_tasks.php';
+    if (function_exists('book_system_setup_ensure_column')) {
+        book_system_setup_ensure_column($conn, 'request_items', 'is_cancelled', 'TINYINT(1) NOT NULL DEFAULT 0 AFTER is_collected');
+    }
+}
 
 if (!isset($_SESSION['admin_logged_in'])) {
     header('Location: admin.php');
     exit;
 }
 
-$admin_id = intval($_SESSION['admin_id'] ?? 0);
-$current_admin_role = $_SESSION['admin_role'] ?? 'rep';
-$is_super_admin = ($current_admin_role === 'super_admin');
+$access_context = function_exists('book_system_get_effective_rep_access_context')
+    ? book_system_get_effective_rep_access_context($conn)
+    : null;
+$session_role = strval($_SESSION['admin_role'] ?? 'rep');
+if (!$access_context) {
+    header('Location: ' . ($session_role === 'super_admin' ? 'manage_reps.php?msg=rep_private' : 'login.php'));
+    exit;
+}
+$admin_id = intval($access_context['effective_admin_id'] ?? 0);
+$current_admin_role = 'rep';
+$is_super_admin = false;
+$dashboard_url = (($access_context['session_role'] ?? '') === 'super_admin' && empty($access_context['is_workspace_mode']))
+    ? 'admin.php'
+    : 'rep_dashboard.php';
 
 $csrf_token = csrf_get_token();
 
@@ -19,7 +37,17 @@ if (!$conn) {
 }
 
 // Fetch available books
-$books_res = $conn->query("SELECT * FROM books WHERE availability = 'available'");
+if ($is_super_admin) {
+    $books_res = $conn->query("SELECT * FROM books WHERE availability = 'available' ORDER BY book_title ASC");
+} else {
+    $books_stmt = $conn->prepare("SELECT * FROM books WHERE availability = 'available' AND (admin_id = ? OR admin_id IS NULL) ORDER BY book_title ASC");
+    $books_res = false;
+    if ($books_stmt) {
+        $books_stmt->bind_param('i', $admin_id);
+        $books_stmt->execute();
+        $books_res = $books_stmt->get_result();
+    }
+}
 
 $semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
 
@@ -46,10 +74,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
 
                 if ($is_super_admin) {
-                    $dup_stmt = $conn->prepare("SELECT b.book_title FROM request_items ri JOIN requests r ON ri.request_id = r.request_id JOIN students s ON r.student_id = s.student_id JOIN books b ON ri.book_id = b.book_id WHERE r.semester_id = ? AND s.index_number = ? AND ri.book_id = ? LIMIT 1");
+                    $dup_stmt = $conn->prepare("SELECT b.book_title FROM request_items ri JOIN requests r ON ri.request_id = r.request_id JOIN students s ON r.student_id = s.student_id JOIN books b ON ri.book_id = b.book_id WHERE r.semester_id = ? AND s.index_number = ? AND ri.book_id = ? AND COALESCE(ri.is_cancelled, 0) = 0 LIMIT 1");
                     $dup_stmt->bind_param('isi', $semester_id, $index_number, $book_id);
                 } else {
-                    $dup_stmt = $conn->prepare("SELECT b.book_title FROM request_items ri JOIN requests r ON ri.request_id = r.request_id JOIN students s ON r.student_id = s.student_id JOIN books b ON ri.book_id = b.book_id WHERE r.semester_id = ? AND r.admin_id = ? AND s.index_number = ? AND ri.book_id = ? LIMIT 1");
+                    $dup_stmt = $conn->prepare("SELECT b.book_title FROM request_items ri JOIN requests r ON ri.request_id = r.request_id JOIN students s ON r.student_id = s.student_id JOIN books b ON ri.book_id = b.book_id WHERE r.semester_id = ? AND r.admin_id = ? AND s.index_number = ? AND ri.book_id = ? AND COALESCE(ri.is_cancelled, 0) = 0 LIMIT 1");
                     $dup_stmt->bind_param('iisi', $semester_id, $admin_id, $index_number, $book_id);
                 }
 
@@ -80,24 +108,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $existing_credit = floatval($srow['credit_balance']);
                     $student_admin_id = intval($srow['admin_id'] ?? 0);
 
-                    if (!$is_super_admin && $student_admin_id > 0 && $student_admin_id !== $admin_id) {
-                        $error = 'Student record is assigned to a different rep. Please contact the administrator.';
-                    } else {
-                        if (!$is_super_admin && $student_admin_id <= 0) {
-                            $claim = $conn->prepare("UPDATE students SET admin_id = ? WHERE student_id = ? AND (admin_id IS NULL OR admin_id = 0)");
-                            $claim->bind_param('ii', $admin_id, $student_id);
-                            $claim->execute();
-                        }
+                    if (!$is_super_admin && $student_admin_id <= 0) {
+                        $claim = $conn->prepare("UPDATE students SET admin_id = ? WHERE student_id = ? AND (admin_id IS NULL OR admin_id = 0)");
+                        $claim->bind_param('ii', $admin_id, $student_id);
+                        $claim->execute();
+                    }
 
-                        if ($is_super_admin) {
-                            $up = $conn->prepare("UPDATE students SET full_name = ?, phone = ? WHERE student_id = ?");
-                            $up->bind_param('ssi', $full_name, $phone, $student_id);
-                            $up->execute();
-                        } else {
-                            $up = $conn->prepare("UPDATE students SET full_name = ?, phone = ? WHERE student_id = ? AND admin_id = ?");
-                            $up->bind_param('ssii', $full_name, $phone, $student_id, $admin_id);
-                            $up->execute();
-                        }
+                    $up = $conn->prepare("UPDATE students SET full_name = ?, phone = ? WHERE student_id = ?");
+                    if ($up) {
+                        $up->bind_param('ssi', $full_name, $phone, $student_id);
+                        $up->execute();
                     }
                 } else {
                     $ins = $conn->prepare("INSERT INTO students (index_number, full_name, phone, credit_balance, admin_id) VALUES (?, ?, ?, 0, ?)");
@@ -155,18 +175,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $payment_status = 'unpaid';
                     }
 
-                    if ($is_super_admin) {
-                        $cstmt = $conn->prepare("UPDATE students SET credit_balance = ? WHERE student_id = ?");
-                        if ($cstmt) {
-                            $cstmt->bind_param('di', $new_credit, $student_id);
-                            $cstmt->execute();
-                        }
-                    } else {
-                        $cstmt = $conn->prepare("UPDATE students SET credit_balance = ? WHERE student_id = ? AND admin_id = ?");
-                        if ($cstmt) {
-                            $cstmt->bind_param('dii', $new_credit, $student_id, $admin_id);
-                            $cstmt->execute();
-                        }
+                    $cstmt = $conn->prepare("UPDATE students SET credit_balance = ? WHERE student_id = ?");
+                    if ($cstmt) {
+                        $cstmt->bind_param('di', $new_credit, $student_id);
+                        $cstmt->execute();
                     }
 
                     $semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
@@ -377,10 +389,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <div class="page-container">
     <div class="page-header">
         <div>
-            <h1>➕ Manual Order</h1>
+            <h1>&#10133; Manual Order</h1>
             <p class="subtitle">Record cash payment & issue books</p>
         </div>
-        <a href="admin.php" class="back-btn">← Back</a>
+        <a href="<?= htmlspecialchars($dashboard_url) ?>" class="back-btn">&larr; Back</a>
     </div>
     
     <div class="card">
@@ -414,7 +426,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                    data-price="<?php echo $b['price']; ?>" 
                                    value="<?php echo $b['book_id']; ?>">
                             <span class="title"><?php echo htmlspecialchars($b['book_title']); ?></span>
-                            <span class="price">GH₵ <?php echo number_format($b['price'], 2); ?></span>
+                            <span class="price">GH&#8373; <?php echo number_format($b['price'], 2); ?></span>
                         </label>
                     <?php endwhile; ?>
                 <?php else: ?>
@@ -425,7 +437,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <div id="credit_info" style="display: none; background: #d4edda; border: 2px solid #28a745; padding: 15px; border-radius: 10px; margin-bottom: 20px;">
                 <strong style="color: #155724;"> Student has existing balance!</strong>
                 <div style="font-size: 24px; color: #28a745; font-weight: bold; margin-top: 5px;">
-                    GH₵ <span id="existing_credit">0.00</span>
+                    GH&#8373; <span id="existing_credit">0.00</span>
                 </div>
                 <small style="color: #155724;">This will be automatically applied to the order.</small>
             </div>
@@ -433,15 +445,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <div class="summary-card">
                 <div class="summary-row">
                     <span class="summary-label">Total Amount</span>
-                    <span class="summary-value">GH₵ <span id="display_total">0.00</span></span>
+                    <span class="summary-value">GH&#8373; <span id="display_total">0.00</span></span>
                 </div>
                 <div id="balance_applied_row" class="summary-row" style="display: none; border-top: 1px solid rgba(255,255,255,0.3); padding-top: 10px;">
                     <span class="summary-label">Balance Applied</span>
-                    <span style="font-size: 18px; font-weight: 600;">- GH₵ <span id="balance_applied">0.00</span></span>
+                    <span style="font-size: 18px; font-weight: 600;">- GH&#8373; <span id="balance_applied">0.00</span></span>
                 </div>
                 <div id="amount_due_row" class="summary-row" style="display: none; border-top: 1px solid rgba(255,255,255,0.3); padding-top: 10px;">
                     <span class="summary-label">Amount Due</span>
-                    <span style="font-size: 22px; font-weight: 700;">GH₵ <span id="amount_due">0.00</span></span>
+                    <span style="font-size: 22px; font-weight: 700;">GH&#8373; <span id="amount_due">0.00</span></span>
                 </div>
                 <div class="cash-input-group">
                     <label>Cash Received</label>
@@ -654,9 +666,18 @@ function checkOwnedBooks(indexNumber) {
             calculateTotal();
         });
 }
+
+document.addEventListener('DOMContentLoaded', function () {
+    var backBtn = document.querySelector('.back-btn');
+    if (backBtn) {
+        backBtn.href = <?= json_encode($dashboard_url) ?>;
+        backBtn.innerHTML = '&larr; Back to Dashboard';
+    }
+});
 </script>
 
 <?php include 'footer.php'; ?>
 
 </body>
 </html>
+

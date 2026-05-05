@@ -1,5 +1,6 @@
-<?php
-session_start();
+﻿<?php
+require_once __DIR__ . '/security_bootstrap.php';
+book_system_secure_session_start();
 if (!isset($_SESSION['admin_logged_in'])) {
     header('Location: admin.php');
     exit;
@@ -8,9 +9,17 @@ include 'db.php';
 
 if (!isset($_GET['id'])) { die("Request ID missing."); }
 
-$current_admin_id = intval($_SESSION['admin_id'] ?? 0);
-$current_admin_role = $_SESSION['admin_role'] ?? 'rep';
-$is_super_admin = ($current_admin_role === 'super_admin');
+$access_context = function_exists('book_system_get_effective_rep_access_context')
+    ? book_system_get_effective_rep_access_context($conn)
+    : null;
+$session_role = strval($_SESSION['admin_role'] ?? 'rep');
+if (!$access_context) {
+    header('Location: ' . ($session_role === 'super_admin' ? 'manage_reps.php?msg=rep_private' : 'login.php'));
+    exit;
+}
+$current_admin_id = intval($access_context['effective_admin_id'] ?? 0);
+$current_admin_role = 'rep';
+$is_super_admin = false;
 
 $csrf_token = csrf_get_token();
 
@@ -145,8 +154,18 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
     exit();
 }
 
-// 4. Get all available books for the checkboxes
-$all_books = $conn->query("SELECT * FROM books");
+// 4. Get books available to this request owner
+if ($is_super_admin) {
+    $all_books = $conn->query("SELECT * FROM books ORDER BY book_title ASC");
+} else {
+    $all_books_stmt = $conn->prepare("SELECT * FROM books WHERE admin_id = ? OR admin_id IS NULL ORDER BY book_title ASC");
+    $all_books = false;
+    if ($all_books_stmt) {
+        $all_books_stmt->bind_param('i', $current_admin_id);
+        $all_books_stmt->execute();
+        $all_books = $all_books_stmt->get_result();
+    }
+}
 ?>
 
 <!DOCTYPE html>
@@ -267,7 +286,7 @@ $all_books = $conn->query("SELECT * FROM books");
 
 <div class="page-container">
     <div class="page-header">
-        <h1>✏️ Edit Request</h1>
+        <h1>&#9998; Edit Request</h1>
         <p class="subtitle"><?php echo htmlspecialchars($request['full_name']); ?></p>
     </div>
     
@@ -283,18 +302,18 @@ $all_books = $conn->query("SELECT * FROM books");
                                data-price="<?php echo $book['price']; ?>"
                             <?php echo in_array($book['book_id'], $current_books) ? 'checked' : ''; ?>>
                         <span class="title"><?php echo htmlspecialchars($book['book_title']); ?></span>
-                        <span class="price">GH₵ <?php echo number_format($book['price'], 2); ?></span>
+                        <span class="price">GH&#8373; <?php echo number_format($book['price'], 2); ?></span>
                     </label>
                 <?php endwhile; ?>
             </div>
 
             <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px; border-radius: 10px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center;">
                 <span style="font-size: 14px; opacity: 0.9;">Total Amount</span>
-                <span style="font-size: 24px; font-weight: 700;">GH₵ <span id="display_total"><?php echo number_format($request['total_amount'], 2); ?></span></span>
+                <span style="font-size: 24px; font-weight: 700;">GH&#8373; <span id="display_total"><?php echo number_format($request['total_amount'], 2); ?></span></span>
             </div>
 
             <div class="form-group">
-                <label>Amount Paid (GH₵)</label>
+                <label>Amount Paid (GH&#8373;)</label>
                 <input type="number" step="0.01" name="amount_paid" id="amount_paid" class="form-input" value="<?php echo $request['amount_paid']; ?>">
             </div>
 
@@ -327,3 +346,4 @@ calculateTotal();
 
 </body>
 </html>
+

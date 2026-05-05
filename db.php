@@ -1,5 +1,8 @@
 <?php
 
+require_once __DIR__ . '/security_bootstrap.php';
+book_system_send_security_headers();
+
 mysqli_report(MYSQLI_REPORT_OFF);
 
 $db_user = getenv('BOOK_SYSTEM_DB_USER');
@@ -134,9 +137,7 @@ foreach (book_db_build_attempts($db_host, $db_port) as $attempt) {
 
 function csrf_get_token(): string {
     if (session_status() !== PHP_SESSION_ACTIVE) {
-        if (!headers_sent()) {
-            @session_start();
-        }
+        book_system_secure_session_start();
     }
 
     if (!isset($_SESSION['csrf_token']) || !is_string($_SESSION['csrf_token']) || strlen($_SESSION['csrf_token']) < 32) {
@@ -164,14 +165,122 @@ function csrf_validate(?string $token): bool {
     return hash_equals($_SESSION['csrf_token'], $token);
 }
 
+function book_system_client_ip(): string {
+    $candidates = [
+        $_SERVER['HTTP_CF_CONNECTING_IP'] ?? null,
+        $_SERVER['HTTP_X_FORWARDED_FOR'] ?? null,
+        $_SERVER['REMOTE_ADDR'] ?? null,
+    ];
+
+    foreach ($candidates as $candidate) {
+        if (!is_string($candidate) || trim($candidate) === '') {
+            continue;
+        }
+
+        $parts = explode(',', $candidate);
+        $ip = trim(strval($parts[0] ?? ''));
+        if ($ip !== '') {
+            return $ip;
+        }
+    }
+
+    return 'unknown';
+}
+
+function book_system_security_debug_enabled(): bool {
+    $debug = getenv('BOOK_SYSTEM_DEBUG');
+    return is_string($debug) && filter_var($debug, FILTER_VALIDATE_BOOL);
+}
+
+function book_system_ensure_login_attempts_table(mysqli $conn): void {
+    static $ensured = false;
+    if ($ensured) {
+        return;
+    }
+
+    $conn->query("CREATE TABLE IF NOT EXISTS login_attempts (
+        attempt_id INT AUTO_INCREMENT PRIMARY KEY,
+        login_scope VARCHAR(20) NOT NULL,
+        identifier CHAR(64) NOT NULL,
+        attempted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_login_attempts_scope_identifier_time (login_scope, identifier, attempted_at),
+        INDEX idx_login_attempts_attempted_at (attempted_at)
+    )");
+    $conn->query("DELETE FROM login_attempts WHERE attempted_at < (NOW() - INTERVAL 1 DAY)");
+    $ensured = true;
+}
+
+function book_system_login_attempt_identifier(string $username): string {
+    return hash('sha256', strtolower(trim($username)) . '|' . book_system_client_ip());
+}
+
+function book_system_is_login_rate_limited(mysqli $conn, string $scope, string $username, int $limit = 5, int $windowMinutes = 15): bool {
+    if ($username === '') {
+        return false;
+    }
+
+    book_system_ensure_login_attempts_table($conn);
+    $identifier = book_system_login_attempt_identifier($username);
+
+    $stmt = $conn->prepare("SELECT COUNT(*) AS attempt_count
+        FROM login_attempts
+        WHERE login_scope = ?
+          AND identifier = ?
+          AND attempted_at >= (NOW() - INTERVAL ? MINUTE)");
+    if (!$stmt) {
+        return false;
+    }
+
+    $stmt->bind_param('ssi', $scope, $identifier, $windowMinutes);
+    $stmt->execute();
+    $res = $stmt->get_result();
+    $count = ($res && $res->num_rows === 1) ? intval($res->fetch_assoc()['attempt_count'] ?? 0) : 0;
+    $stmt->close();
+
+    return $count >= $limit;
+}
+
+function book_system_record_login_attempt(mysqli $conn, string $scope, string $username, bool $success): void {
+    if ($username === '') {
+        return;
+    }
+
+    book_system_ensure_login_attempts_table($conn);
+    $identifier = book_system_login_attempt_identifier($username);
+
+    if ($success) {
+        $stmt = $conn->prepare("DELETE FROM login_attempts WHERE login_scope = ? AND identifier = ?");
+        if ($stmt) {
+            $stmt->bind_param('ss', $scope, $identifier);
+            $stmt->execute();
+            $stmt->close();
+        }
+        return;
+    }
+
+    $stmt = $conn->prepare("INSERT INTO login_attempts (login_scope, identifier) VALUES (?, ?)");
+    if ($stmt) {
+        $stmt->bind_param('ss', $scope, $identifier);
+        $stmt->execute();
+        $stmt->close();
+    }
+}
+
 if (!$conn) {
     $last_error = book_db_pick_best_error($connection_errors, $last_error);
     $hint = book_db_connection_hint($last_error);
-    die("Database connection failed. {$hint} Last error: {$last_error}");
+    error_log("Book System DB connection failed: {$last_error}");
+    if (book_system_security_debug_enabled()) {
+        die("Database connection failed. {$hint} Last error: {$last_error}");
+    }
+    die("Database connection failed. Please contact the system administrator.");
 }
 
 if (file_exists(__DIR__ . '/app_helpers.php')) {
     require_once __DIR__ . '/app_helpers.php';
+    if (function_exists('book_system_ensure_balance_carry_forward_table')) {
+        book_system_ensure_balance_carry_forward_table($conn);
+    }
 }
 
 if (file_exists(__DIR__ . '/cache_helper.php')) {
@@ -181,3 +290,16 @@ if (file_exists(__DIR__ . '/cache_helper.php')) {
 $ACTIVE_SEMESTER_ID = function_exists('book_system_get_active_semester_id')
     ? book_system_get_active_semester_id($conn)
     : 0;
+$ACTIVE_SEMESTER_NAME = function_exists('book_system_get_active_semester_name')
+    ? book_system_get_active_semester_name($conn)
+    : '';
+$ACTIVE_SEMESTER_START_DATE = function_exists('book_system_get_active_semester_start_date')
+    ? book_system_get_active_semester_start_date($conn)
+    : '';
+$ACTIVE_SEMESTER_LABEL = function_exists('book_system_build_semester_label')
+    ? book_system_build_semester_label($ACTIVE_SEMESTER_NAME, $ACTIVE_SEMESTER_START_DATE)
+    : $ACTIVE_SEMESTER_NAME;
+
+if (function_exists('book_system_enforce_rep_subscription_access')) {
+    book_system_enforce_rep_subscription_access($conn);
+}

@@ -1,5 +1,6 @@
-<?php
-session_start();
+﻿<?php
+require_once __DIR__ . '/security_bootstrap.php';
+book_system_secure_session_start();
 require_once 'db.php';
 require_once 'setup_tasks.php';
 
@@ -253,3 +254,4 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['run_setup'])) {
 <?php include 'footer.php'; ?>
 </body>
 </html>
+

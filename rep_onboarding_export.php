@@ -1,5 +1,6 @@
-<?php
-session_start();
+﻿<?php
+require_once __DIR__ . '/security_bootstrap.php';
+book_system_secure_session_start();
 require_once 'db.php';
 
 if (!isset($_SESSION['admin_logged_in']) || ($_SESSION['admin_role'] ?? '') !== 'super_admin') {
@@ -130,3 +131,4 @@ if ($result) {
 
 fclose($output);
 exit;
+

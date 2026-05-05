@@ -1,5 +1,6 @@
-<?php
-session_start();
+﻿<?php
+require_once __DIR__ . '/security_bootstrap.php';
+book_system_secure_session_start();
 require_once 'db.php';
 
 header('Content-Type: application/json');
@@ -11,9 +12,16 @@ if (isset($_GET['index'])) {
     $current_admin_id = intval($_SESSION['admin_id'] ?? 0);
     $current_admin_role = $_SESSION['admin_role'] ?? 'rep';
     $is_super_admin = (($current_admin_role ?? '') === 'super_admin');
+    $access_context = null;
 
-    // If authenticated, allow using session admin_id as scope (manual order uses this endpoint).
-    if ($rep_id <= 0 && isset($_SESSION['admin_logged_in']) && $current_admin_id > 0) {
+    if (isset($_SESSION['admin_logged_in']) && function_exists('book_system_get_effective_rep_access_context')) {
+        $access_context = book_system_get_effective_rep_access_context($conn);
+    }
+
+    // If authenticated, use the effective rep workspace scope when available.
+    if ($rep_id <= 0 && $access_context && intval($access_context['effective_admin_id'] ?? 0) > 0) {
+        $rep_id = intval($access_context['effective_admin_id'] ?? 0);
+    } elseif ($rep_id <= 0 && isset($_SESSION['admin_logged_in']) && $current_admin_id > 0 && !$is_super_admin) {
         $rep_id = $current_admin_id;
     }
 
@@ -29,20 +37,11 @@ if (isset($_GET['index'])) {
     // Only return students.credit_balance for exact index matches.
     if ($exact_index) {
         $result = null;
-        if ($is_super_admin) {
-            $stmt = $conn->prepare("SELECT index_number, full_name, phone, credit_balance FROM students WHERE index_number = ? LIMIT 1");
-            if ($stmt) {
-                $stmt->bind_param('s', $index);
-                $stmt->execute();
-                $result = $stmt->get_result();
-            }
-        } else {
-            $stmt = $conn->prepare("SELECT index_number, full_name, phone, credit_balance FROM students WHERE index_number = ? AND (admin_id = ? OR admin_id IS NULL OR admin_id = 0) LIMIT 1");
-            if ($stmt) {
-                $stmt->bind_param('si', $index, $rep_id);
-                $stmt->execute();
-                $result = $stmt->get_result();
-            }
+        $stmt = $conn->prepare("SELECT index_number, full_name, phone, credit_balance FROM students WHERE index_number = ? LIMIT 1");
+        if ($stmt) {
+            $stmt->bind_param('s', $index);
+            $stmt->execute();
+            $result = $stmt->get_result();
         }
 
         if ($result && $result->num_rows > 0) {
@@ -85,3 +84,4 @@ if (isset($_GET['index'])) {
 } else {
     echo json_encode(['found' => false, 'credit_balance' => 0]);
 }
+

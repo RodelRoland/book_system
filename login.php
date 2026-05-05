@@ -1,7 +1,18 @@
 <?php
-session_start();
+require_once __DIR__ . '/security_bootstrap.php';
+book_system_secure_session_start();
 error_reporting(0); // Suppress errors on login page to prevent HTML breakage
 require_once 'db.php';
+if (file_exists(__DIR__ . '/setup_tasks.php')) {
+    require_once __DIR__ . '/setup_tasks.php';
+    if (function_exists('book_system_setup_ensure_column')) {
+        book_system_setup_ensure_column($conn, 'admins', 'trial_started_at', 'DATETIME NULL AFTER approved_at');
+        book_system_setup_ensure_column($conn, 'admins', 'trial_expires_at', 'DATETIME NULL AFTER trial_started_at');
+        book_system_setup_ensure_column($conn, 'admins', 'subscription_active', 'TINYINT(1) NOT NULL DEFAULT 0 AFTER trial_expires_at');
+        book_system_setup_ensure_column($conn, 'admins', 'subscription_started_at', 'DATETIME NULL AFTER subscription_active');
+        book_system_setup_ensure_column($conn, 'admins', 'subscription_expires_at', 'DATETIME NULL AFTER subscription_started_at');
+    }
+}
 
 // Redirect if already logged in
 if (isset($_SESSION['admin_logged_in'])) {
@@ -22,51 +33,72 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
     } else {
         $username = trim($_POST['username'] ?? '');
         $password = $_POST['password'] ?? '';
+
+        if (book_system_is_login_rate_limited($conn, 'admin', $username)) {
+            $error = 'Too many login attempts. Please wait a few minutes and try again.';
+        } else {
         
-        try {
-            // Authenticate against admins table
-            $stmt = $conn->prepare("SELECT admin_id, username, password_hash, full_name, class_name, role, is_active, requires_password_reset FROM admins WHERE username = ?");
-            if ($stmt) {
-                $stmt->bind_param("s", $username);
-                $stmt->execute();
-                $result = $stmt->get_result();
-                
-                if ($result && $result->num_rows === 1) {
-                    $admin = $result->fetch_assoc();
+            try {
+                // Authenticate against admins table
+                $trialColumnsAvailable = function_exists('book_system_admin_trial_columns_available')
+                    ? book_system_admin_trial_columns_available($conn)
+                    : false;
+                $trialSelect = $trialColumnsAvailable
+                    ? ", trial_started_at, trial_expires_at, subscription_active, subscription_started_at, subscription_expires_at, approved_at, created_at"
+                    : ", approved_at, created_at";
+                $stmt = $conn->prepare("SELECT admin_id, username, password_hash, full_name, class_name, role, is_active, requires_password_reset{$trialSelect} FROM admins WHERE username = ?");
+                if ($stmt) {
+                    $stmt->bind_param("s", $username);
+                    $stmt->execute();
+                    $result = $stmt->get_result();
                     
-                    // Check if account is active
-                    if (!$admin['is_active']) {
-                        $error = "Your account has been deactivated. Contact the administrator.";
-                    } elseif (password_verify($password, $admin['password_hash'])) {
-                        // Check password reset requirement AFTER verifying password
-                        if (intval($admin['requires_password_reset'] ?? 0) === 1 && ($admin['role'] ?? '') === 'rep') {
-                            $_SESSION['reset_admin_id'] = $admin['admin_id'];
-                            header('Location: rep_first_time_reset.php');
+                    if ($result && $result->num_rows === 1) {
+                        $admin = $result->fetch_assoc();
+                        
+                        // Check if account is active
+                        if (!$admin['is_active']) {
+                            $error = "Your account has been deactivated. Contact the administrator.";
+                        } elseif (password_verify($password, $admin['password_hash'])) {
+                            book_system_secure_session_regenerate(true);
+                            book_system_record_login_attempt($conn, 'admin', $username, true);
+
+                            // Check password reset requirement AFTER verifying password
+                            if (intval($admin['requires_password_reset'] ?? 0) === 1 && ($admin['role'] ?? '') === 'rep') {
+                                $_SESSION['reset_admin_id'] = $admin['admin_id'];
+                                header('Location: rep_first_time_reset.php');
+                                exit;
+                            }
+                            $_SESSION['admin_logged_in'] = true;
+                            $_SESSION['admin_id'] = $admin['admin_id'];
+                            $_SESSION['admin_username'] = $admin['username'];
+                            $_SESSION['admin_full_name'] = $admin['full_name'];
+                            $_SESSION['admin_class_name'] = $admin['class_name'];
+                            $_SESSION['admin_role'] = $admin['role'];
+                            if ($admin['role'] === 'super_admin') {
+                                header('Location: super_admin_home.php');
+                            } else {
+                                $repAccessStatus = function_exists('book_system_build_rep_access_status_from_row')
+                                    ? book_system_build_rep_access_status_from_row($admin)
+                                    : ['can_access' => true];
+                                header('Location: ' . (!empty($repAccessStatus['can_access']) ? 'rep_dashboard.php' : 'rep_subscription.php'));
+                            }
                             exit;
-                        }
-                        $_SESSION['admin_logged_in'] = true;
-                        $_SESSION['admin_id'] = $admin['admin_id'];
-                        $_SESSION['admin_username'] = $admin['username'];
-                        $_SESSION['admin_full_name'] = $admin['full_name'];
-                        $_SESSION['admin_class_name'] = $admin['class_name'];
-                        $_SESSION['admin_role'] = $admin['role'];
-                        if ($admin['role'] === 'super_admin') {
-                            header('Location: super_admin_home.php');
                         } else {
-                            header('Location: rep_dashboard.php');
+                            $error = "Invalid username or password.";
                         }
-                        exit;
                     } else {
                         $error = "Invalid username or password.";
                     }
                 } else {
-                    $error = "Invalid username or password.";
+                    $error = "Database error. Please try again.";
                 }
-            } else {
-                $error = "Database error. Please try again.";
+            } catch (Exception $e) {
+                $error = "System error. Please try again.";
             }
-        } catch (Exception $e) {
-            $error = "System error. Please try again.";
+
+            if ($error !== '') {
+                book_system_record_login_attempt($conn, 'admin', $username, false);
+            }
         }
     }
 }

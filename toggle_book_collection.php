@@ -1,5 +1,6 @@
-<?php
-session_start();
+﻿<?php
+require_once __DIR__ . '/security_bootstrap.php';
+book_system_secure_session_start();
 if (!isset($_SESSION['admin_logged_in'])) {
     if (isset($_GET['ajax'])) {
         header('Content-Type: application/json');
@@ -10,10 +11,29 @@ if (!isset($_SESSION['admin_logged_in'])) {
     exit;
 }
 include 'db.php';
+if (file_exists(__DIR__ . '/setup_tasks.php')) {
+    require_once __DIR__ . '/setup_tasks.php';
+    if (function_exists('book_system_setup_ensure_column')) {
+        book_system_setup_ensure_column($conn, 'request_items', 'is_cancelled', 'TINYINT(1) NOT NULL DEFAULT 0 AFTER is_collected');
+    }
+}
 
-$current_admin_id = intval($_SESSION['admin_id'] ?? 0);
-$current_admin_role = $_SESSION['admin_role'] ?? 'rep';
-$is_super_admin = ($current_admin_role === 'super_admin');
+$access_context = function_exists('book_system_get_effective_rep_access_context')
+    ? book_system_get_effective_rep_access_context($conn)
+    : null;
+$session_role = strval($_SESSION['admin_role'] ?? 'rep');
+if (!$access_context) {
+    if (isset($_GET['ajax']) || isset($_POST['ajax'])) {
+        header('Content-Type: application/json');
+        echo json_encode(['success' => false, 'error' => 'Rep workspace access is required']);
+        exit;
+    }
+    header('Location: ' . ($session_role === 'super_admin' ? 'manage_reps.php?msg=rep_private' : 'login.php'));
+    exit;
+}
+$current_admin_id = intval($access_context['effective_admin_id'] ?? 0);
+$current_admin_role = 'rep';
+$is_super_admin = false;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['item_id'])) {
     if (!csrf_validate($_POST['csrf_token'] ?? null)) {
@@ -39,12 +59,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['item_id'])) {
 
     // Get current status first to determine if we're collecting or uncollecting
     if ($is_super_admin) {
-        $current_stmt = $conn->prepare("SELECT is_collected FROM request_items WHERE item_id = ?");
+        $current_stmt = $conn->prepare("SELECT is_collected, COALESCE(is_cancelled, 0) AS is_cancelled FROM request_items WHERE item_id = ?");
     } else {
-        $current_stmt = $conn->prepare("SELECT ri.is_collected FROM request_items ri JOIN requests r ON r.request_id = ri.request_id WHERE ri.item_id = ? AND r.admin_id = ?");
+        $current_stmt = $conn->prepare("SELECT ri.is_collected, COALESCE(ri.is_cancelled, 0) AS is_cancelled FROM request_items ri JOIN requests r ON r.request_id = ri.request_id WHERE ri.item_id = ? AND r.admin_id = ?");
     }
     
     $current_status = 0;
+    $is_cancelled = 0;
     if ($current_stmt) {
         if ($is_super_admin) {
             $current_stmt->bind_param('i', $item_id);
@@ -54,8 +75,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['item_id'])) {
         $current_stmt->execute();
         $current_result = $current_stmt->get_result();
         if ($current_result && $current_result->num_rows === 1) {
-            $current_status = intval($current_result->fetch_assoc()['is_collected']);
+            $current_row = $current_result->fetch_assoc();
+            $current_status = intval($current_row['is_collected'] ?? 0);
+            $is_cancelled = intval($current_row['is_cancelled'] ?? 0);
         }
+    }
+
+    if ($is_cancelled === 1) {
+        if (isset($_POST['ajax'])) {
+            header('Content-Type: application/json');
+            echo json_encode(['success' => false, 'error' => 'Cancelled items cannot be collected']);
+            exit;
+        }
+        header("Location: view_request.php?msg=cancelled_item");
+        exit;
     }
 
     // Toggle is_collected and set/clear received_at accordingly
@@ -140,3 +173,4 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['item_id'])) {
     exit;
 }
 ?>
+

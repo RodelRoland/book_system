@@ -1,6 +1,18 @@
 ﻿<?php
-session_start();
+require_once __DIR__ . '/security_bootstrap.php';
+book_system_secure_session_start();
 require_once 'db.php';
+if (file_exists(__DIR__ . '/setup_tasks.php')) {
+    require_once __DIR__ . '/setup_tasks.php';
+    if (function_exists('book_system_setup_ensure_column')) {
+        book_system_setup_ensure_column($conn, 'admins', 'trial_started_at', 'DATETIME NULL AFTER approved_at');
+        book_system_setup_ensure_column($conn, 'admins', 'trial_expires_at', 'DATETIME NULL AFTER trial_started_at');
+        book_system_setup_ensure_column($conn, 'admins', 'subscription_active', 'TINYINT(1) NOT NULL DEFAULT 0 AFTER trial_expires_at');
+        book_system_setup_ensure_column($conn, 'admins', 'subscription_started_at', 'DATETIME NULL AFTER subscription_active');
+        book_system_setup_ensure_column($conn, 'admins', 'subscription_expires_at', 'DATETIME NULL AFTER subscription_started_at');
+        book_system_setup_ensure_column($conn, 'admins', 'profile_photo_path', 'VARCHAR(255) NULL AFTER public_display_name');
+    }
+}
 
 // Redirect to login if not logged in
 if (!isset($_SESSION['admin_logged_in'])) {
@@ -8,13 +20,28 @@ if (!isset($_SESSION['admin_logged_in'])) {
     exit;
 }
 
-// Redirect super admin to admin.php
-if (($_SESSION['admin_role'] ?? '') === 'super_admin') {
-    header('Location: admin.php');
+$access_context = function_exists('book_system_get_effective_rep_access_context')
+    ? book_system_get_effective_rep_access_context($conn)
+    : null;
+$session_role = strval($_SESSION['admin_role'] ?? '');
+
+if (!$access_context) {
+    header('Location: ' . ($session_role === 'super_admin' ? 'manage_reps.php?msg=rep_private' : 'login.php'));
     exit;
 }
 
 // Handle Logout
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['leave_workspace']) && !empty($access_context['is_workspace_mode'])) {
+    if (!csrf_validate($_POST['csrf_token'] ?? null)) {
+        header('Location: rep_dashboard.php?msg=csrf_invalid');
+        exit;
+    }
+    unset($_SESSION['super_admin_rep_context_id']);
+    unset($_SESSION['super_admin_data_scope']);
+    header("Location: manage_reps.php?msg=workspace_closed");
+    exit;
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['logout'])) {
     if (!csrf_validate($_POST['csrf_token'] ?? null)) {
         header('Location: rep_dashboard.php?msg=csrf_invalid');
@@ -26,62 +53,41 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['logout'])) {
 }
 
 // Get current rep info
-$current_admin_id = intval($_SESSION['admin_id'] ?? 0);
-$current_admin_class = $_SESSION['admin_class_name'] ?? '';
-$current_admin_name = $_SESSION['admin_full_name'] ?? $_SESSION['admin_username'] ?? 'Rep';
+$current_admin_id = intval($access_context['effective_admin_id'] ?? 0);
+$current_admin_class = strval($access_context['effective_class_name'] ?? '');
+$current_admin_name = strval($access_context['effective_full_name'] ?? $access_context['effective_username'] ?? 'Rep');
+$viewing_workspace = !empty($access_context['is_workspace_mode']);
+$profile_photo_path = '';
+$profile_initials = strtoupper(substr(preg_replace('/[^A-Za-z0-9]/', '', $current_admin_name), 0, 2));
+if ($profile_initials === '') {
+    $profile_initials = 'RP';
+}
+$profile_stmt = $conn->prepare("SELECT profile_photo_path FROM admins WHERE admin_id = ?");
+if ($profile_stmt) {
+    $profile_stmt->bind_param('i', $current_admin_id);
+    $profile_stmt->execute();
+    $profile_stmt->bind_result($profile_photo_path_result);
+    if ($profile_stmt->fetch()) {
+        $profile_photo_path = trim(strval($profile_photo_path_result ?? ''));
+    }
+    $profile_stmt->close();
+}
+$rep_access_status = ($session_role === 'rep' && function_exists('book_system_get_rep_access_status'))
+    ? book_system_get_rep_access_status($conn, $current_admin_id)
+    : [];
 
 // Fetch rep's stats
 $semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
-
-$total_collected = 0;
-$paid_to_lecturers = 0;
+$total_collected = 0.0;
+$paid_to_lecturers = 0.0;
 $total_pending = 0;
+$net_balance = 0.0;
 
-$stmt = $conn->prepare("SELECT COALESCE(SUM(total_amount), 0) AS total FROM requests WHERE payment_status = 'paid' AND semester_id = ? AND admin_id = ?");
-if ($stmt) {
-    $stmt->bind_param('ii', $semester_id, $current_admin_id);
-    $stmt->execute();
-    $rev_res = $stmt->get_result();
-    if ($rev_res && $rev_res->num_rows === 1) {
-        $total_collected = floatval($rev_res->fetch_assoc()['total'] ?? 0);
-    }
-}
-
-$stmt = $conn->prepare("SELECT COALESCE(SUM(amount_paid), 0) AS total FROM lecturer_payments WHERE semester_id = ? AND admin_id = ?");
-if ($stmt) {
-    $stmt->bind_param('ii', $semester_id, $current_admin_id);
-    $stmt->execute();
-    $lec_res = $stmt->get_result();
-    if ($lec_res && $lec_res->num_rows === 1) {
-        $paid_to_lecturers = floatval($lec_res->fetch_assoc()['total'] ?? 0);
-    }
-}
-
-$net_balance = $total_collected - $paid_to_lecturers;
-
-$stmt = $conn->prepare("SELECT COUNT(*) AS count FROM requests WHERE payment_status = 'unpaid' AND semester_id = ? AND admin_id = ?");
-if ($stmt) {
-    $stmt->bind_param('ii', $semester_id, $current_admin_id);
-    $stmt->execute();
-    $pen_res = $stmt->get_result();
-    if ($pen_res && $pen_res->num_rows === 1) {
-        $total_pending = intval($pen_res->fetch_assoc()['count'] ?? 0);
-    }
-}
-
-// Get active semester name
-$active_semester_name = '';
-$stmt = $conn->prepare("SELECT semester_name FROM semesters WHERE is_active = 1 ORDER BY semester_id DESC LIMIT 1");
-if ($stmt) {
-    $stmt->execute();
-    $sem_res = $stmt->get_result();
-    if ($sem_res && $sem_res->num_rows > 0) {
-        $active_semester_name = strval($sem_res->fetch_assoc()['semester_name'] ?? '');
-    }
-}
+$active_semester_name = isset($ACTIVE_SEMESTER_NAME) ? strval($ACTIVE_SEMESTER_NAME) : '';
+$active_semester_label = isset($ACTIVE_SEMESTER_LABEL) ? strval($ACTIVE_SEMESTER_LABEL) : $active_semester_name;
 
 // Get rep's unique order link
-$rep_username = $_SESSION['admin_username'] ?? '';
+$rep_username = strval($access_context['effective_username'] ?? '');
 $order_link = "index.php?rep=" . urlencode($rep_username);
 $request_scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
 $request_host = $_SERVER['HTTP_HOST'] ?? 'localhost';
@@ -107,6 +113,28 @@ if (!empty($dashboard_metrics)) {
     $paid_to_lecturers = floatval($dashboard_metrics['lecturer_paid'] ?? $paid_to_lecturers);
     $net_balance = floatval($dashboard_metrics['available_balance'] ?? ($total_collected - $paid_to_lecturers));
     $total_pending = intval($dashboard_metrics['unpaid_requests'] ?? $total_pending);
+} else {
+    $net_balance = $total_collected - $paid_to_lecturers;
+}
+
+$today_date = date('Y-m-d');
+$unseen_request_count = 0;
+$today_request_count = 0;
+$notification_stmt = $conn->prepare("SELECT
+        SUM(CASE WHEN rep_viewed_at IS NULL THEN 1 ELSE 0 END) AS unseen_requests,
+        SUM(CASE WHEN DATE(created_at) = ? THEN 1 ELSE 0 END) AS today_requests
+    FROM requests
+    WHERE semester_id = ? AND admin_id = ?");
+if ($notification_stmt) {
+    $notification_stmt->bind_param('sii', $today_date, $semester_id, $current_admin_id);
+    $notification_stmt->execute();
+    $notification_res = $notification_stmt->get_result();
+    if ($notification_res && $notification_res->num_rows === 1) {
+        $notification_row = $notification_res->fetch_assoc();
+        $unseen_request_count = intval($notification_row['unseen_requests'] ?? 0);
+        $today_request_count = intval($notification_row['today_requests'] ?? 0);
+    }
+    $notification_stmt->close();
 }
 
 $chart_max_value = 1;
@@ -149,11 +177,38 @@ foreach ($semester_chart_rows as $chart_row) {
             margin-bottom: 20px;
             box-shadow: 0 10px 30px rgba(46, 125, 50, 0.3);
         }
+        .header-top {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+        .header-avatar {
+            width: 78px;
+            height: 78px;
+            border-radius: 50%;
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+            border: 3px solid rgba(255,255,255,0.32);
+            background: rgba(255,255,255,0.16);
+            box-shadow: 0 12px 28px rgba(0,0,0,0.18);
+            font-size: 26px;
+            font-weight: 800;
+            letter-spacing: 0.04em;
+            color: #ffffff;
+            background-size: cover;
+            background-position: center;
+        }
+        .header-avatar.has-photo { color: transparent; }
+        .header-copy { min-width: 0; }
         .dashboard-header h1 { font-size: 24px; font-weight: 600; }
         .dashboard-header .subtitle { opacity: 0.9; margin-top: 5px; font-size: 14px; }
         .header-actions {
             display: flex;
-            justify-content: space-between;
+            justify-content: flex-end;
             align-items: center;
             margin-top: 15px;
             flex-wrap: wrap;
@@ -171,22 +226,36 @@ foreach ($semester_chart_rows as $chart_row) {
         }
         .logout-btn:hover { background: rgba(255,255,255,0.3); }
         
-        .order-link-box {
-            background: rgba(255,255,255,0.15);
-            padding: 12px 15px;
-            border-radius: 8px;
-            font-size: 13px;
-            display: flex;
+        .notification-link {
+            position: relative;
+            display: inline-flex;
             align-items: center;
-            gap: 10px;
-            flex-wrap: wrap;
+            justify-content: center;
+            width: 46px;
+            height: 46px;
+            border-radius: 50%;
+            background: rgba(255,255,255,0.18);
+            color: white;
+            text-decoration: none;
+            border: 1px solid rgba(255,255,255,0.28);
+            font-size: 22px;
         }
-        .order-link-box code {
-            background: rgba(0,0,0,0.2);
-            padding: 5px 10px;
-            border-radius: 4px;
-            font-family: monospace;
-            word-break: break-all;
+        .notification-badge {
+            position: absolute;
+            top: -4px;
+            right: -2px;
+            min-width: 22px;
+            height: 22px;
+            padding: 0 6px;
+            border-radius: 999px;
+            background: #dc2626;
+            color: white;
+            font-size: 11px;
+            font-weight: 800;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.18);
         }
         .copy-btn {
             background: white;
@@ -199,6 +268,100 @@ foreach ($semester_chart_rows as $chart_row) {
             font-size: 12px;
         }
         .copy-btn:hover { background: #f5f5f5; }
+        .share-spotlight {
+            background: linear-gradient(135deg, #ffffff 0%, #f0fdf4 100%);
+            border-radius: 18px;
+            padding: 20px;
+            box-shadow: 0 10px 30px rgba(46, 125, 50, 0.16);
+            margin-bottom: 20px;
+            border: 1px solid rgba(67, 160, 71, 0.16);
+            position: relative;
+            overflow: hidden;
+        }
+        .share-spotlight::before {
+            content: '';
+            position: absolute;
+            width: 180px;
+            height: 180px;
+            border-radius: 50%;
+            background: rgba(67, 160, 71, 0.08);
+            top: -80px;
+            right: -40px;
+        }
+        .share-spotlight h2 {
+            font-size: 18px;
+            color: #14532d;
+            margin-bottom: 8px;
+            position: relative;
+            z-index: 1;
+        }
+        .share-spotlight p {
+            color: #3f3f46;
+            font-size: 13px;
+            margin-bottom: 14px;
+            position: relative;
+            z-index: 1;
+        }
+        .share-spotlight-code {
+            display: block;
+            padding: 12px 14px;
+            border-radius: 12px;
+            background: #0f172a;
+            color: #f8fafc;
+            font-family: Consolas, monospace;
+            font-size: 12px;
+            word-break: break-all;
+            position: relative;
+            z-index: 1;
+        }
+        .share-spotlight-actions {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-top: 14px;
+            position: relative;
+            z-index: 1;
+        }
+        .share-action-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 11px 16px;
+            border-radius: 12px;
+            text-decoration: none;
+            font-size: 13px;
+            font-weight: 700;
+            border: none;
+            cursor: pointer;
+        }
+        .share-action-btn.primary {
+            background: linear-gradient(135deg, #16a34a 0%, #15803d 100%);
+            color: white;
+        }
+        .share-action-btn.secondary {
+            background: #e0f2fe;
+            color: #075985;
+        }
+        .share-action-btn:hover { opacity: 0.94; }
+        .trial-banner {
+            background: linear-gradient(135deg, #fff8e1 0%, #fff3cd 100%);
+            color: #7c4a03;
+            border: 1px solid rgba(217, 119, 6, 0.22);
+            border-radius: 18px;
+            padding: 16px 18px;
+            box-shadow: 0 8px 20px rgba(217, 119, 6, 0.10);
+            margin-bottom: 18px;
+        }
+        .trial-banner strong {
+            display: block;
+            font-size: 15px;
+            margin-bottom: 4px;
+        }
+        .trial-banner span {
+            font-size: 13px;
+            line-height: 1.6;
+        }
         
         .stats-grid {
             display: grid;
@@ -378,42 +541,78 @@ foreach ($semester_chart_rows as $chart_row) {
         .menu-item .text h3 { font-size: 14px; font-weight: 600; margin-bottom: 2px; }
         .menu-item .text p { font-size: 11px; color: #888; }
         
-        .welcome-note {
-            background: #fff3e0;
-            border: 1px solid #ffcc80;
-            border-radius: 10px;
-            padding: 15px;
-            margin-bottom: 20px;
-            font-size: 14px;
-            color: #e65100;
+        @media (max-width: 640px) {
+            .header-top { align-items: flex-start; }
+            .header-avatar {
+                width: 70px;
+                height: 70px;
+                font-size: 22px;
+            }
+            .share-action-btn { width: 100%; }
         }
-        .welcome-note strong { color: #bf360c; }
     </style>
 </head>
 <body>
 
 <div class="dashboard-container">
     <div class="dashboard-header">
-        <h1>Welcome, <?php echo htmlspecialchars($current_admin_name); ?></h1>
-        <p class="subtitle">Class: <?php echo htmlspecialchars($current_admin_class ?: 'Class Representative'); ?><?php echo $active_semester_name ? ' &bull; ' . htmlspecialchars($active_semester_name) : ''; ?></p>
+        <div class="header-top">
+            <div
+                class="header-avatar<?php echo $profile_photo_path !== '' ? ' has-photo' : ''; ?>"
+                <?php if ($profile_photo_path !== ''): ?>
+                    style="background-image:url('<?php echo htmlspecialchars($profile_photo_path, ENT_QUOTES); ?>');"
+                <?php endif; ?>
+            ><?php echo htmlspecialchars($profile_initials); ?></div>
+            <div class="header-copy">
+                <h1>Welcome, <?php echo htmlspecialchars($current_admin_name); ?></h1>
+                <p class="subtitle">Class: <?php echo htmlspecialchars($current_admin_class ?: 'Class Representative'); ?><?php echo $active_semester_label ? ' &bull; ' . htmlspecialchars($active_semester_label) : ''; ?></p>
+                <?php if ($viewing_workspace): ?>
+                    <p class="subtitle" style="margin-top:8px; font-weight:600;">Super admin workspace view for this rep is active.</p>
+                <?php endif; ?>
+            </div>
+        </div>
         
         <div class="header-actions">
-            <div class="order-link-box">
-                <span>&#128279; Your Order Link:</span>
-                <code id="orderLink"><?php echo htmlspecialchars($public_order_link); ?></code>
-                <button class="copy-btn" onclick="copyLink()">Copy</button>
-            </div>
+            <a href="view_request.php?notification_view=1&request_day=<?php echo urlencode($today_date); ?>" class="notification-link" title="Today's requests">
+                &#128276;
+                <?php if ($today_request_count > 0): ?>
+                    <span class="notification-badge"><?php echo $today_request_count > 99 ? '99+' : $today_request_count; ?></span>
+                <?php endif; ?>
+            </a>
+            <?php if ($viewing_workspace): ?>
+            <form method="POST" style="margin:0;">
+                <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
+                <button type="submit" name="leave_workspace" value="1" class="logout-btn">Leave Workspace</button>
+            </form>
+            <?php endif; ?>
             <form method="POST" style="margin:0;">
                 <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
                 <button type="submit" name="logout" value="1" class="logout-btn">Logout</button>
             </form>
         </div>
     </div>
-    
-    <div class="welcome-note">
-        <strong>Tip:</strong> Share your order link with students in your class. When they order through your link, their payments will appear in your dashboard.
+
+    <?php if (!empty($rep_access_status['is_trial_expiring_soon'])): ?>
+    <div class="trial-banner">
+        <strong>Free trial ending soon</strong>
+        <span>
+            <?php echo htmlspecialchars(strval($rep_access_status['reminder_message'] ?? 'Your free trial will expire soon.')); ?>
+            Please make arrangements to subscribe before access stops at 12:00 AM on
+            <?php echo htmlspecialchars(date('M d, Y', strtotime(strval($rep_access_status['trial_expires_at'] ?? 'now')))); ?>.
+        </span>
     </div>
-    
+    <?php endif; ?>
+
+    <div class="share-spotlight">
+        <h2>Share Your Class Request Link</h2>
+        <p>Keep this link handy anytime your class needs to place requests. You can also download your full rep data as a manual backup.</p>
+        <code class="share-spotlight-code" id="orderLink"><?php echo htmlspecialchars($public_order_link); ?></code>
+        <div class="share-spotlight-actions">
+            <button type="button" class="share-action-btn primary" onclick="copyLink()">&#128203; Copy Class Link</button>
+            <a href="rep_export_data.php" class="share-action-btn secondary">&#128229; Download My Data</a>
+        </div>
+    </div>
+
     <div class="stats-grid">
         <div class="stat-card">
             <div class="label">Cash Collected</div>
@@ -485,13 +684,15 @@ foreach ($semester_chart_rows as $chart_row) {
                     <p>Review your recent request and payment changes</p>
                 </div>
             </a>
+            <?php if (!$viewing_workspace): ?>
             <a href="generate_access_code.php" class="menu-item">
                 <div class="icon">&#128274;</div>
                 <div class="text">
-                    <h3>Access Code</h3>
-                    <p>Generate code for super admin</p>
+                    <h3>Workspace Access</h3>
+                    <p>Control super admin workspace sharing</p>
                 </div>
             </a>
+            <?php endif; ?>
         </div>
     </div>
 </div>
@@ -511,4 +712,5 @@ function copyLink() {
 
 </body>
 </html>
+
 

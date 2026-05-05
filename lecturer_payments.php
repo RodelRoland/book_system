@@ -1,6 +1,13 @@
 ﻿<?php
-session_start();
+require_once __DIR__ . '/security_bootstrap.php';
+book_system_secure_session_start();
 require_once 'db.php';
+if (file_exists(__DIR__ . '/setup_tasks.php')) {
+    require_once __DIR__ . '/setup_tasks.php';
+    if (function_exists('book_system_setup_ensure_column')) {
+        book_system_setup_ensure_column($conn, 'request_items', 'is_cancelled', 'TINYINT(1) NOT NULL DEFAULT 0 AFTER is_collected');
+    }
+}
 
 if (!isset($_SESSION['admin_logged_in'])) {
     header('Location: admin.php');
@@ -13,10 +20,59 @@ $error_msg = '';
 $semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
 
 // Get current admin info for filtering
-$current_admin_id = intval($_SESSION['admin_id'] ?? 0);
-$current_admin_role = $_SESSION['admin_role'] ?? 'rep';
-$is_super_admin = ($current_admin_role === 'super_admin');
-$admin_filter = $is_super_admin ? '' : "AND admin_id = $current_admin_id";
+$access_context = function_exists('book_system_get_effective_rep_access_context')
+    ? book_system_get_effective_rep_access_context($conn)
+    : null;
+$session_role = strval($_SESSION['admin_role'] ?? 'rep');
+if (!$access_context) {
+    header('Location: ' . ($session_role === 'super_admin' ? 'manage_reps.php?msg=rep_private' : 'login.php'));
+    exit;
+}
+$current_admin_id = intval($access_context['effective_admin_id'] ?? 0);
+$current_admin_role = 'rep';
+$is_super_admin = false;
+$export_scope_admin_id = $current_admin_id;
+$current_admin_username = strval($access_context['effective_username'] ?? '');
+$admin_filter = "AND admin_id = $current_admin_id";
+$dashboard_url = (($access_context['session_role'] ?? '') === 'super_admin' && empty($access_context['is_workspace_mode']))
+    ? 'admin.php'
+    : 'rep_dashboard.php';
+
+function book_system_ensure_lecturer_export_tables(mysqli $conn): void {
+    static $ensured = false;
+    if ($ensured) {
+        return;
+    }
+
+    $conn->query("CREATE TABLE IF NOT EXISTS lecturer_export_batches (
+        batch_id INT AUTO_INCREMENT PRIMARY KEY,
+        admin_id INT NOT NULL DEFAULT 0,
+        book_id INT NOT NULL,
+        semester_id INT NOT NULL,
+        export_mode ENUM('new','all') NOT NULL DEFAULT 'new',
+        start_date DATE NULL,
+        end_date DATE NULL,
+        exported_by_username VARCHAR(50) NULL,
+        exported_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_lecturer_export_batches_scope (admin_id, book_id, semester_id, exported_at),
+        INDEX idx_lecturer_export_batches_book (book_id)
+    )");
+
+    $conn->query("CREATE TABLE IF NOT EXISTS lecturer_export_batch_items (
+        batch_item_id INT AUTO_INCREMENT PRIMARY KEY,
+        batch_id INT NOT NULL,
+        student_id INT NOT NULL,
+        exported_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_lecturer_export_batch_student (batch_id, student_id),
+        INDEX idx_lecturer_export_batch_items_student (student_id),
+        CONSTRAINT fk_lecturer_export_batch_items_batch FOREIGN KEY (batch_id) REFERENCES lecturer_export_batches(batch_id) ON DELETE CASCADE,
+        CONSTRAINT fk_lecturer_export_batch_items_student FOREIGN KEY (student_id) REFERENCES students(student_id) ON DELETE CASCADE
+    )");
+
+    $ensured = true;
+}
+
+book_system_ensure_lecturer_export_tables($conn);
 
 $selected_book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
 $selected_book_title = '';
@@ -26,6 +82,11 @@ $selected_yet_students = 0;
 $selected_total_students = 0;
 
 $csrf_token = csrf_get_token();
+
+$page_msg = trim(strval($_GET['msg'] ?? ''));
+if ($page_msg === 'no_new_exports') {
+    $success_msg = 'All currently listed students have already been exported. Use Export All if you want to send the full list again.';
+}
 
 // Handle recording books received from lecturer
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['record_received'])) {
@@ -325,6 +386,7 @@ $books_sql = "
         WHERE semester_id = ? " . ($is_super_admin ? "" : "AND admin_id = ?") . "
         GROUP BY book_id
     ) lp ON b.book_id = lp.book_id
+    " . ($is_super_admin ? "" : "WHERE (b.admin_id = ? OR b.admin_id IS NULL)") . "
     GROUP BY b.book_id
     ORDER BY b.book_title ASC
 ";
@@ -334,15 +396,20 @@ if ($books_stmt) {
     if ($is_super_admin) {
         $books_stmt->bind_param('iii', $semester_id, $semester_id, $semester_id);
     } else {
-        $books_stmt->bind_param('iiiiii', $semester_id, $current_admin_id, $semester_id, $current_admin_id, $semester_id, $current_admin_id);
+        $books_stmt->bind_param('iiiiiii', $semester_id, $current_admin_id, $semester_id, $current_admin_id, $semester_id, $current_admin_id, $current_admin_id);
     }
     $books_stmt->execute();
     $books_result = $books_stmt->get_result();
 }
 
 if ($selected_book_id > 0) {
-    $stmt = $conn->prepare("SELECT book_title FROM books WHERE book_id = ? LIMIT 1");
-    $stmt->bind_param("i", $selected_book_id);
+    if ($is_super_admin) {
+        $stmt = $conn->prepare("SELECT book_title FROM books WHERE book_id = ? LIMIT 1");
+        $stmt->bind_param("i", $selected_book_id);
+    } else {
+        $stmt = $conn->prepare("SELECT book_title FROM books WHERE book_id = ? AND (admin_id = ? OR admin_id IS NULL) LIMIT 1");
+        $stmt->bind_param("ii", $selected_book_id, $current_admin_id);
+    }
     $stmt->execute();
     $res = $stmt->get_result();
     if ($res && $res->num_rows === 1) {
@@ -354,10 +421,10 @@ if ($selected_book_id > 0) {
 
 if ($selected_book_id > 0) {
     if ($is_super_admin) {
-        $stmt = $conn->prepare("SELECT COUNT(DISTINCT r.student_id) AS c FROM request_items ri JOIN requests r ON ri.request_id = r.request_id WHERE ri.book_id = ? AND r.semester_id = ?");
+        $stmt = $conn->prepare("SELECT COUNT(DISTINCT r.student_id) AS c FROM request_items ri JOIN requests r ON ri.request_id = r.request_id WHERE ri.book_id = ? AND COALESCE(ri.is_cancelled, 0) = 0 AND r.semester_id = ?");
         $stmt->bind_param("ii", $selected_book_id, $semester_id);
     } else {
-        $stmt = $conn->prepare("SELECT COUNT(DISTINCT r.student_id) AS c FROM request_items ri JOIN requests r ON ri.request_id = r.request_id WHERE ri.book_id = ? AND r.semester_id = ? AND r.admin_id = ?");
+        $stmt = $conn->prepare("SELECT COUNT(DISTINCT r.student_id) AS c FROM request_items ri JOIN requests r ON ri.request_id = r.request_id WHERE ri.book_id = ? AND COALESCE(ri.is_cancelled, 0) = 0 AND r.semester_id = ? AND r.admin_id = ?");
         $stmt->bind_param("iii", $selected_book_id, $semester_id, $current_admin_id);
     }
     $stmt->execute();
@@ -367,10 +434,10 @@ if ($selected_book_id > 0) {
     }
 
     if ($is_super_admin) {
-        $stmt = $conn->prepare("SELECT COUNT(DISTINCT r.student_id) AS c FROM request_items ri JOIN requests r ON ri.request_id = r.request_id WHERE ri.book_id = ? AND ri.is_collected = 1 AND r.semester_id = ?");
+        $stmt = $conn->prepare("SELECT COUNT(DISTINCT r.student_id) AS c FROM request_items ri JOIN requests r ON ri.request_id = r.request_id WHERE ri.book_id = ? AND ri.is_collected = 1 AND COALESCE(ri.is_cancelled, 0) = 0 AND r.semester_id = ?");
         $stmt->bind_param("ii", $selected_book_id, $semester_id);
     } else {
-        $stmt = $conn->prepare("SELECT COUNT(DISTINCT r.student_id) AS c FROM request_items ri JOIN requests r ON ri.request_id = r.request_id WHERE ri.book_id = ? AND ri.is_collected = 1 AND r.semester_id = ? AND r.admin_id = ?");
+        $stmt = $conn->prepare("SELECT COUNT(DISTINCT r.student_id) AS c FROM request_items ri JOIN requests r ON ri.request_id = r.request_id WHERE ri.book_id = ? AND ri.is_collected = 1 AND COALESCE(ri.is_cancelled, 0) = 0 AND r.semester_id = ? AND r.admin_id = ?");
         $stmt->bind_param("iii", $selected_book_id, $semester_id, $current_admin_id);
     }
     $stmt->execute();
@@ -380,10 +447,10 @@ if ($selected_book_id > 0) {
     }
 
     if ($is_super_admin) {
-        $stmt = $conn->prepare("SELECT COUNT(DISTINCT r.student_id) AS c FROM request_items ri JOIN requests r ON ri.request_id = r.request_id WHERE ri.book_id = ? AND ri.is_collected = 0 AND r.semester_id = ?");
+        $stmt = $conn->prepare("SELECT COUNT(DISTINCT r.student_id) AS c FROM request_items ri JOIN requests r ON ri.request_id = r.request_id WHERE ri.book_id = ? AND ri.is_collected = 0 AND COALESCE(ri.is_cancelled, 0) = 0 AND r.semester_id = ?");
         $stmt->bind_param("ii", $selected_book_id, $semester_id);
     } else {
-        $stmt = $conn->prepare("SELECT COUNT(DISTINCT r.student_id) AS c FROM request_items ri JOIN requests r ON ri.request_id = r.request_id WHERE ri.book_id = ? AND ri.is_collected = 0 AND r.semester_id = ? AND r.admin_id = ?");
+        $stmt = $conn->prepare("SELECT COUNT(DISTINCT r.student_id) AS c FROM request_items ri JOIN requests r ON ri.request_id = r.request_id WHERE ri.book_id = ? AND ri.is_collected = 0 AND COALESCE(ri.is_cancelled, 0) = 0 AND r.semester_id = ? AND r.admin_id = ?");
         $stmt->bind_param("iii", $selected_book_id, $semester_id, $current_admin_id);
     }
     $stmt->execute();
@@ -395,11 +462,14 @@ if ($selected_book_id > 0) {
 
 $selected_received_result = null;
 $selected_payments_result = null;
-$students_received = null;
-$students_yet_to_receive = null;
+$students_received_rows = [];
+$students_yet_to_receive_rows = [];
+$students_received_new_count = 0;
+$students_received_exported_count = 0;
 $show_received_list = isset($_GET['show_received']) && $_GET['show_received'] === '1';
 $show_yet_list = isset($_GET['show_yet']) && $_GET['show_yet'] === '1';
 $export_received = isset($_GET['export_received']) && $_GET['export_received'] === '1';
+$export_mode = (isset($_GET['export_mode']) && $_GET['export_mode'] === 'all') ? 'all' : 'new';
 
 $start_date = isset($_GET['start_date']) ? trim($_GET['start_date']) : '';
 $end_date = isset($_GET['end_date']) ? trim($_GET['end_date']) : '';
@@ -455,7 +525,56 @@ if ($selected_book_id > 0) {
             }
         }
         $stmt->execute();
-        $students_received = $stmt->get_result();
+        $students_received_result = $stmt->get_result();
+        if ($students_received_result) {
+            while ($row = $students_received_result->fetch_assoc()) {
+                $row['exported_before'] = false;
+                $row['first_exported_at'] = null;
+                $row['last_exported_at'] = null;
+                $row['export_count'] = 0;
+                $students_received_rows[] = $row;
+            }
+        }
+
+        if (!empty($students_received_rows)) {
+            $exported_students = [];
+            $stmt = $conn->prepare("
+                SELECT
+                    ebi.student_id,
+                    MIN(leb.exported_at) AS first_exported_at,
+                    MAX(leb.exported_at) AS last_exported_at,
+                    COUNT(*) AS export_count
+                FROM lecturer_export_batch_items ebi
+                JOIN lecturer_export_batches leb ON leb.batch_id = ebi.batch_id
+                WHERE leb.admin_id = ? AND leb.book_id = ? AND leb.semester_id = ?
+                GROUP BY ebi.student_id
+            ");
+            if ($stmt) {
+                $stmt->bind_param("iii", $export_scope_admin_id, $selected_book_id, $semester_id);
+                $stmt->execute();
+                $export_log_result = $stmt->get_result();
+                if ($export_log_result) {
+                    while ($export_row = $export_log_result->fetch_assoc()) {
+                        $exported_students[intval($export_row['student_id'] ?? 0)] = $export_row;
+                    }
+                }
+                $stmt->close();
+            }
+
+            foreach ($students_received_rows as &$received_row) {
+                $student_export = $exported_students[intval($received_row['student_id'] ?? 0)] ?? null;
+                if ($student_export) {
+                    $received_row['exported_before'] = true;
+                    $received_row['first_exported_at'] = $student_export['first_exported_at'] ?? null;
+                    $received_row['last_exported_at'] = $student_export['last_exported_at'] ?? null;
+                    $received_row['export_count'] = intval($student_export['export_count'] ?? 0);
+                    $students_received_exported_count++;
+                } else {
+                    $students_received_new_count++;
+                }
+            }
+            unset($received_row);
+        }
     }
     
     // Fetch students who haven't received this book yet
@@ -466,7 +585,7 @@ if ($selected_book_id > 0) {
             FROM request_items ri 
             JOIN requests r ON ri.request_id = r.request_id 
             JOIN students s ON r.student_id = s.student_id
-            WHERE ri.book_id = ? AND ri.is_collected = 0 AND r.semester_id = ?
+            WHERE ri.book_id = ? AND ri.is_collected = 0 AND COALESCE(ri.is_cancelled, 0) = 0 AND r.semester_id = ?
             ORDER BY s.full_name ASC
         ");
             $stmt->bind_param("ii", $selected_book_id, $semester_id);
@@ -476,69 +595,103 @@ if ($selected_book_id > 0) {
             FROM request_items ri 
             JOIN requests r ON ri.request_id = r.request_id 
             JOIN students s ON r.student_id = s.student_id
-            WHERE ri.book_id = ? AND ri.is_collected = 0 AND r.semester_id = ? AND r.admin_id = ?
+            WHERE ri.book_id = ? AND ri.is_collected = 0 AND COALESCE(ri.is_cancelled, 0) = 0 AND r.semester_id = ? AND r.admin_id = ?
             ORDER BY s.full_name ASC
         ");
             $stmt->bind_param("iii", $selected_book_id, $semester_id, $current_admin_id);
         }
         $stmt->execute();
-        $students_yet_to_receive = $stmt->get_result();
+        $students_yet_to_receive_result = $stmt->get_result();
+        if ($students_yet_to_receive_result) {
+            while ($row = $students_yet_to_receive_result->fetch_assoc()) {
+                $students_yet_to_receive_rows[] = $row;
+            }
+        }
     }
 }
 
 if ($export_received && $selected_book_id > 0) {
-    if (!$has_date_range) {
-        ?>
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Select Date Range</title>
-            <style>
-                body{font-family:Segoe UI,Tahoma,Geneva,Verdana,sans-serif;background:#f5f7fa;padding:30px;}
-                .card{max-width:520px;margin:0 auto;background:#fff;border-radius:14px;padding:22px;box-shadow:0 4px 15px rgba(0,0,0,.08);}
-                label{display:block;margin:12px 0 6px;font-weight:600;color:#444;}
-                input{width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:10px;font-size:14px;}
-                .btn{margin-top:16px;width:100%;padding:12px 14px;border:none;border-radius:10px;background:#667eea;color:#fff;font-weight:700;cursor:pointer;}
-                .link{display:block;margin-top:12px;text-align:center;color:#667eea;text-decoration:none;font-weight:600;}
-            </style>
-        </head>
-        <body>
-            <div class="card">
-                <h3 style="margin:0 0 8px;color:#333;">Export date range</h3>
-                <div style="color:#666;font-size:13px;">Select start and end dates before exporting.</div>
-                <form method="GET">
-                    <input type="hidden" name="book_id" value="<?php echo intval($selected_book_id); ?>">
-                    <input type="hidden" name="export_received" value="1">
-                    <label>Start Date</label>
-                    <input type="date" name="start_date" required>
-                    <label>End Date</label>
-                    <input type="date" name="end_date" required>
-                    <button type="submit" class="btn">Export</button>
-                </form>
-                <a class="link" href="lecturer_payments.php?book_id=<?php echo intval($selected_book_id); ?>&show_received=1">Back</a>
-            </div>
-        </body>
-        </html>
-        <?php
+    $export_rows = [];
+    foreach ($students_received_rows as $row) {
+        if ($export_mode === 'all' || empty($row['exported_before'])) {
+            $export_rows[] = $row;
+        }
+    }
+
+    if (empty($export_rows)) {
+        header('Location: lecturer_payments.php?book_id=' . intval($selected_book_id) . '&show_received=1&msg=no_new_exports');
         exit;
+    }
+
+    $batch_id = 0;
+    $conn->begin_transaction();
+    try {
+        $batch_stmt = $conn->prepare("
+            INSERT INTO lecturer_export_batches (
+                admin_id, book_id, semester_id, export_mode, start_date, end_date, exported_by_username
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ");
+        if (!$batch_stmt) {
+            throw new RuntimeException('Could not prepare export batch insert.');
+        }
+
+        $batch_stmt->bind_param(
+            "iiissss",
+            $export_scope_admin_id,
+            $selected_book_id,
+            $semester_id,
+            $export_mode,
+            $start_date,
+            $end_date,
+            $current_admin_username
+        );
+        $batch_stmt->execute();
+        $batch_id = intval($conn->insert_id);
+        $batch_stmt->close();
+
+        $item_stmt = $conn->prepare("INSERT INTO lecturer_export_batch_items (batch_id, student_id) VALUES (?, ?)");
+        if (!$item_stmt) {
+            throw new RuntimeException('Could not prepare export batch item insert.');
+        }
+
+        foreach ($export_rows as $row) {
+            $student_id = intval($row['student_id'] ?? 0);
+            $item_stmt->bind_param("ii", $batch_id, $student_id);
+            $item_stmt->execute();
+        }
+        $item_stmt->close();
+
+        $conn->commit();
+    } catch (Throwable $e) {
+        $conn->rollback();
+        die('Unable to complete export right now. Please refresh and try again.');
+    }
+
+    if (function_exists('book_system_audit_log')) {
+        book_system_audit_log($conn, 'export_received_students', 'lecturer_export_batch', $batch_id, [
+            'book_id' => $selected_book_id,
+            'book_title' => $selected_book_title,
+            'semester_id' => $semester_id,
+            'export_mode' => $export_mode,
+            'start_date' => $start_date,
+            'end_date' => $end_date,
+            'students_exported' => count($export_rows),
+        ]);
     }
 
     header('Content-Type: text/csv');
     $safe_title = preg_replace('/[^a-zA-Z0-9_-]+/', '_', $selected_book_title ?: ('book_' . $selected_book_id));
-    header('Content-Disposition: attachment; filename=students_received_' . $safe_title . '_' . $start_date . '_to_' . $end_date . '.csv');
+    $export_prefix = ($export_mode === 'all') ? 'students_received_all_' : 'students_received_new_';
+    header('Content-Disposition: attachment; filename=' . $export_prefix . $safe_title . '_' . date('Y-m-d') . '.csv');
     $output = fopen('php://output', 'w');
     fputcsv($output, ['Student Name', 'Index Number', 'Phone', 'Date Received']);
-    if ($students_received) {
-        while ($row = $students_received->fetch_assoc()) {
-            fputcsv($output, [
-                $row['full_name'],
-                $row['index_number'],
-                $row['phone'],
-                $row['display_date'],
-            ]);
-        }
+    foreach ($export_rows as $row) {
+        fputcsv($output, [
+            $row['full_name'],
+            $row['index_number'],
+            $row['phone'],
+            $row['display_date'],
+        ]);
     }
     fclose($output);
     exit;
@@ -580,10 +733,28 @@ if ($is_super_admin) {
     }
 }
 
-// Fetch books for dropdown
-$dropdown_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY book_title ASC");
-$dropdown_books2 = $conn->query("SELECT book_id, book_title FROM books ORDER BY book_title ASC");
-$filter_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY book_title ASC");
+// Fetch books for dropdowns
+$book_options = [];
+if ($is_super_admin) {
+    $book_options_result = $conn->query("SELECT book_id, book_title FROM books ORDER BY book_title ASC");
+    if ($book_options_result) {
+        while ($row = $book_options_result->fetch_assoc()) {
+            $book_options[] = $row;
+        }
+    }
+} else {
+    $book_options_stmt = $conn->prepare("SELECT book_id, book_title FROM books WHERE admin_id = ? OR admin_id IS NULL ORDER BY book_title ASC");
+    if ($book_options_stmt) {
+        $book_options_stmt->bind_param('i', $current_admin_id);
+        $book_options_stmt->execute();
+        $book_options_result = $book_options_stmt->get_result();
+        if ($book_options_result) {
+            while ($row = $book_options_result->fetch_assoc()) {
+                $book_options[] = $row;
+            }
+        }
+    }
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -973,11 +1144,11 @@ $filter_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY boo
             <form method="GET" style="margin: 0;">
                 <select name="book_id" onchange="this.form.submit()" class="header-select">
                     <option value="">Filter by book...</option>
-                    <?php while ($b = $filter_books->fetch_assoc()): ?>
+                    <?php foreach ($book_options as $b): ?>
                         <option value="<?php echo intval($b['book_id']); ?>" <?php echo ($selected_book_id === intval($b['book_id'])) ? 'selected' : ''; ?>>
                             <?php echo htmlspecialchars($b['book_title']); ?>
                         </option>
-                    <?php endwhile; ?>
+                    <?php endforeach; ?>
                 </select>
             </form>
             <?php if ($selected_book_id > 0): ?>
@@ -995,7 +1166,7 @@ $filter_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY boo
                     </div>
                 </div>
             <?php endif; ?>
-            <a href="admin.php" class="back-btn">&larr; Back to Dashboard</a>
+            <a href="<?= htmlspecialchars($dashboard_url) ?>" class="back-btn">&larr; Back to Dashboard</a>
         </div>
     </div>
 
@@ -1070,15 +1241,20 @@ $filter_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY boo
         </div>
         </div>
 
-        <?php if ($show_received_list && $students_received && $students_received->num_rows > 0): ?>
+        <?php if ($show_received_list && !empty($students_received_rows)): ?>
         <div class="card" style="margin-bottom: 25px; border-left: 4px solid #28a745;">
             <h3 class="section-heading success" style="color: #28a745;">
                 <span class="mini-icon">&#128203;</span>
-                <span>Students Received "<?php echo htmlspecialchars($selected_book_title); ?>" (<?php echo $students_received->num_rows; ?>)</span>
+                <span>Students Received "<?php echo htmlspecialchars($selected_book_title); ?>" (<?php echo count($students_received_rows); ?>)</span>
             </h3>
+            <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:15px;">
+                <span style="padding:6px 12px; border-radius:999px; background:#e8fff0; color:#15803d; font-size:12px; font-weight:700;">New to Export: <?php echo number_format($students_received_new_count); ?></span>
+                <span style="padding:6px 12px; border-radius:999px; background:#f3f4f6; color:#6b7280; font-size:12px; font-weight:700;">Already Exported: <?php echo number_format($students_received_exported_count); ?></span>
+            </div>
             <div style="display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap;">
                 <a href="?book_id=<?php echo $selected_book_id; ?>" class="btn-primary" style="width: auto; padding: 8px 16px; font-size: 13px; text-decoration: none; display: inline-block; background: #6c757d;">Hide List</a>
-                <a href="?book_id=<?php echo $selected_book_id; ?>&export_received=1" class="btn-primary" style="width: auto; padding: 8px 16px; font-size: 13px; text-decoration: none; display: inline-block;">Export (Excel)</a>
+                <a href="?book_id=<?php echo $selected_book_id; ?>&export_received=1&export_mode=new" class="btn-primary" style="width: auto; padding: 8px 16px; font-size: 13px; text-decoration: none; display: inline-block; <?php echo $students_received_new_count === 0 ? 'background:#94a3b8;' : ''; ?>">Export New (<?php echo number_format($students_received_new_count); ?>)</a>
+                <a href="?book_id=<?php echo $selected_book_id; ?>&export_received=1&export_mode=all" class="btn-primary" style="width: auto; padding: 8px 16px; font-size: 13px; text-decoration: none; display: inline-block; background:#4f46e5;">Export All</a>
             </div>
             <div class="table-container">
                 <table>
@@ -1089,18 +1265,28 @@ $filter_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY boo
                             <th>Index Number</th>
                             <th>Phone</th>
                             <th>Date Received</th>
+                            <th>Export Status</th>
                         </tr>
                     </thead>
                     <tbody>
-                        <?php $counter = 1; while ($student = $students_received->fetch_assoc()): ?>
-                        <tr>
+                        <?php $counter = 1; foreach ($students_received_rows as $student): ?>
+                        <tr style="<?php echo !empty($student['exported_before']) ? 'background:#f8fafc; color:#94a3b8;' : ''; ?>">
                             <td><?php echo $counter++; ?></td>
-                            <td><strong><?php echo htmlspecialchars($student['full_name']); ?></strong></td>
+                            <td><strong style="<?php echo !empty($student['exported_before']) ? 'color:#6b7280;' : ''; ?>"><?php echo htmlspecialchars($student['full_name']); ?></strong></td>
                             <td><?php echo htmlspecialchars($student['index_number']); ?></td>
                             <td><?php echo htmlspecialchars($student['phone'] ?: '-'); ?></td>
                             <td><?php echo date('M d, Y', strtotime($student['display_date'])); ?></td>
+                            <td>
+                                <?php if (!empty($student['exported_before'])): ?>
+                                    <span style="display:inline-flex; align-items:center; padding:5px 10px; border-radius:999px; background:#e5e7eb; color:#6b7280; font-size:11px; font-weight:700;">
+                                        Exported<?php echo !empty($student['last_exported_at']) ? ' • ' . htmlspecialchars(date('M d, Y', strtotime($student['last_exported_at']))) : ''; ?>
+                                    </span>
+                                <?php else: ?>
+                                    <span style="display:inline-flex; align-items:center; padding:5px 10px; border-radius:999px; background:#dcfce7; color:#166534; font-size:11px; font-weight:700;">New</span>
+                                <?php endif; ?>
+                            </td>
                         </tr>
-                        <?php endwhile; ?>
+                        <?php endforeach; ?>
                     </tbody>
                 </table>
             </div>
@@ -1116,11 +1302,11 @@ $filter_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY boo
         </div>
         <?php endif; ?>
         
-        <?php if ($show_yet_list && $students_yet_to_receive && $students_yet_to_receive->num_rows > 0): ?>
+        <?php if ($show_yet_list && !empty($students_yet_to_receive_rows)): ?>
         <div class="card" style="margin-bottom: 25px; border-left: 4px solid #dc3545;">
             <h3 class="section-heading danger" style="color: #dc3545;">
                 <span class="mini-icon">&#128203;</span>
-                <span>Students Yet to Receive "<?php echo htmlspecialchars($selected_book_title); ?>" (<?php echo $students_yet_to_receive->num_rows; ?>)</span>
+                <span>Students Yet to Receive "<?php echo htmlspecialchars($selected_book_title); ?>" (<?php echo count($students_yet_to_receive_rows); ?>)</span>
             </h3>
             <div style="display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap;">
                 <a href="?book_id=<?php echo $selected_book_id; ?>" class="btn-primary" style="width: auto; padding: 8px 16px; font-size: 13px; text-decoration: none; display: inline-block;">Hide List</a>
@@ -1137,7 +1323,7 @@ $filter_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY boo
                         </tr>
                     </thead>
                     <tbody>
-                        <?php $counter = 1; while ($student = $students_yet_to_receive->fetch_assoc()): ?>
+                        <?php $counter = 1; foreach ($students_yet_to_receive_rows as $student): ?>
                         <tr>
                             <td><?php echo $counter++; ?></td>
                             <td><strong><?php echo htmlspecialchars($student['full_name']); ?></strong></td>
@@ -1145,7 +1331,7 @@ $filter_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY boo
                             <td><?php echo htmlspecialchars($student['phone'] ?: '-'); ?></td>
                             <td><?php echo date('M d, Y', strtotime($student['display_date'])); ?></td>
                         </tr>
-                        <?php endwhile; ?>
+                        <?php endforeach; ?>
                     </tbody>
                 </table>
             </div>
@@ -1291,11 +1477,11 @@ $filter_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY boo
                     <label>Select Book *</label>
                     <select name="book_id" required>
                         <option value="">-- Choose a book --</option>
-                        <?php while ($book = $dropdown_books->fetch_assoc()): ?>
+                        <?php foreach ($book_options as $book): ?>
                             <option value="<?php echo $book['book_id']; ?>">
                                 <?php echo htmlspecialchars($book['book_title']); ?>
                             </option>
-                        <?php endwhile; ?>
+                        <?php endforeach; ?>
                     </select>
                 </div>
                 
@@ -1336,11 +1522,11 @@ $filter_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY boo
                     <label>Select Book *</label>
                     <select name="book_id" required>
                         <option value="">-- Choose a book --</option>
-                        <?php while ($book = $dropdown_books2->fetch_assoc()): ?>
+                        <?php foreach ($book_options as $book): ?>
                             <option value="<?php echo $book['book_id']; ?>">
                                 <?php echo htmlspecialchars($book['book_title']); ?>
                             </option>
-                        <?php endwhile; ?>
+                        <?php endforeach; ?>
                     </select>
                 </div>
                 
@@ -1511,4 +1697,5 @@ $filter_books = $conn->query("SELECT book_id, book_title FROM books ORDER BY boo
 
 </body>
 </html>
+
 

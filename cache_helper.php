@@ -143,18 +143,57 @@ function is_using_redis() {
 /**
  * Get books list with caching (used on multiple pages)
  */
-function get_cached_books($conn, $available_only = true) {
-    $cache_key = 'books_list_' . ($available_only ? 'available' : 'all');
-    
-    return cache_get($cache_key, 300, function() use ($conn, $available_only) {
-        $where = $available_only ? "WHERE availability = 'available'" : "";
-        $result = $conn->query("SELECT book_id, book_title, price, availability FROM books $where ORDER BY book_title ASC");
-        $books = [];
-        if ($result) {
-            while ($row = $result->fetch_assoc()) {
-                $books[] = $row;
-            }
+function get_cached_books($conn, $available_only = true, $admin_id = null, $include_legacy_unassigned = true) {
+    $cache_key = 'books_list_' . ($available_only ? 'available' : 'all')
+        . '_admin_' . ($admin_id === null ? 'all' : intval($admin_id))
+        . '_legacy_' . ($include_legacy_unassigned ? 'yes' : 'no');
+
+    return cache_get($cache_key, 300, function() use ($conn, $available_only, $admin_id, $include_legacy_unassigned) {
+        $sql = "SELECT book_id, book_title, price, availability FROM books";
+        $conditions = [];
+        $types = '';
+        $params = [];
+
+        if ($available_only) {
+            $conditions[] = "availability = 'available'";
         }
+
+        if ($admin_id !== null) {
+            $conditions[] = $include_legacy_unassigned ? "(admin_id = ? OR admin_id IS NULL)" : "admin_id = ?";
+            $types .= 'i';
+            $params[] = intval($admin_id);
+        }
+
+        if (!empty($conditions)) {
+            $sql .= ' WHERE ' . implode(' AND ', $conditions);
+        }
+
+        $sql .= ' ORDER BY book_title ASC';
+        $books = [];
+
+        if (empty($params)) {
+            $result = $conn->query($sql);
+            if ($result) {
+                while ($row = $result->fetch_assoc()) {
+                    $books[] = $row;
+                }
+            }
+            return $books;
+        }
+
+        $stmt = $conn->prepare($sql);
+        if ($stmt) {
+            $stmt->bind_param($types, ...$params);
+            $stmt->execute();
+            $result = $stmt->get_result();
+            if ($result) {
+                while ($row = $result->fetch_assoc()) {
+                    $books[] = $row;
+                }
+            }
+            $stmt->close();
+        }
+
         return $books;
     });
 }
@@ -163,8 +202,7 @@ function get_cached_books($conn, $available_only = true) {
  * Clear books cache (call when books are modified)
  */
 function clear_books_cache() {
-    cache_clear('books_list_available');
-    cache_clear('books_list_all');
+    cache_clear_all();
 }
 
 /**

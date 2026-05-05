@@ -1,6 +1,13 @@
-<?php
-session_start();
+﻿<?php
+require_once __DIR__ . '/security_bootstrap.php';
+book_system_secure_session_start();
 include 'db.php';
+if (file_exists(__DIR__ . '/setup_tasks.php')) {
+    require_once __DIR__ . '/setup_tasks.php';
+    if (function_exists('book_system_setup_ensure_column')) {
+        book_system_setup_ensure_column($conn, 'request_items', 'is_cancelled', 'TINYINT(1) NOT NULL DEFAULT 0 AFTER is_collected');
+    }
+}
 
 /* Protect export (admin only) */
 if (!isset($_SESSION['admin_logged_in'])) {
@@ -8,9 +15,17 @@ if (!isset($_SESSION['admin_logged_in'])) {
     exit;
 }
 
-$current_admin_id = intval($_SESSION['admin_id'] ?? 0);
-$current_admin_role = $_SESSION['admin_role'] ?? 'rep';
-$is_super_admin = ($current_admin_role === 'super_admin');
+$access_context = function_exists('book_system_get_effective_rep_access_context')
+    ? book_system_get_effective_rep_access_context($conn)
+    : null;
+$session_role = strval($_SESSION['admin_role'] ?? 'rep');
+if (!$access_context) {
+    header('Location: ' . ($session_role === 'super_admin' ? 'manage_reps.php?msg=rep_private' : 'login.php'));
+    exit;
+}
+$current_admin_id = intval($access_context['effective_admin_id'] ?? 0);
+$current_admin_role = 'rep';
+$is_super_admin = false;
 
 // Capture the search term from the URL
 $search = isset($_GET['search']) ? trim($_GET['search']) : '';
@@ -24,7 +39,7 @@ if (!in_array($collection_filter, ['all', 'not_taken'], true)) {
 
 $collection_where = '';
 if ($collection_filter === 'not_taken') {
-    $collection_where = " AND (ri.is_collected = 0 OR ri.is_collected IS NULL) ";
+    $collection_where = " AND COALESCE(ri.is_cancelled, 0) = 0 AND (ri.is_collected = 0 OR ri.is_collected IS NULL) ";
 }
 
 /* Tell browser this is a CSV file */
@@ -40,7 +55,7 @@ fputcsv($output, ['Index Number', 'Student Name', 'Phone', 'Book Title', 'Paymen
 /* Fetch data - Prepared for safety */
 $sql = "SELECT 
             s.index_number, s.full_name, s.phone, b.book_title, 
-            r.payment_status, ri.is_collected, 
+            r.payment_status, ri.is_collected, COALESCE(ri.is_cancelled, 0) AS is_cancelled,
             COALESCE(ri.received_at, r.created_at) as display_date,
             r.created_at as request_date,
             ri.received_at as received_date
@@ -85,7 +100,7 @@ if ($stmt) {
 
 /* Write rows */
 while ($result && ($row = $result->fetch_assoc())) {
-    $status = ($row['is_collected'] == 1) ? 'COLLECTED' : 'PENDING';
+    $status = intval($row['is_cancelled'] ?? 0) === 1 ? 'REFUNDED' : (($row['is_collected'] == 1) ? 'COLLECTED' : 'PENDING');
     fputcsv($output, [
         $row['index_number'],
         $row['full_name'],
@@ -99,3 +114,4 @@ while ($result && ($row = $result->fetch_assoc())) {
 
 fclose($output);
 exit;
+

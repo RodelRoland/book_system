@@ -1,5 +1,6 @@
-<?php
-session_start();
+﻿<?php
+require_once __DIR__ . '/security_bootstrap.php';
+book_system_secure_session_start();
 require_once 'db.php';
 
 header('Content-Type: application/json');
@@ -30,3 +31,4 @@ if ($result && $result->num_rows === 1) {
 } else {
     echo json_encode(['success' => false, 'error' => 'Student not found']);
 }
+

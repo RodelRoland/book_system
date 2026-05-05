@@ -1,5 +1,6 @@
-<?php
-session_start();
+﻿<?php
+require_once __DIR__ . '/security_bootstrap.php';
+book_system_secure_session_start();
 require_once 'db.php';
 if (file_exists(__DIR__ . '/setup_tasks.php')) {
     require_once __DIR__ . '/setup_tasks.php';
@@ -7,6 +8,15 @@ if (file_exists(__DIR__ . '/setup_tasks.php')) {
         book_system_setup_ensure_column($conn, 'lecturers', 'teaching_level', 'VARCHAR(10) NULL AFTER full_name');
     }
 }
+$conn->query("CREATE TABLE IF NOT EXISTS lecturer_materials (
+    material_id INT AUTO_INCREMENT PRIMARY KEY,
+    lecturer_id INT NOT NULL,
+    material_title VARCHAR(100) NOT NULL,
+    course_code VARCHAR(20) NOT NULL,
+    course_code_key VARCHAR(20) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_lecturer_material_code (lecturer_id, course_code_key)
+)");
 
 if (!isset($_SESSION['admin_logged_in']) || ($_SESSION['admin_role'] ?? '') !== 'super_admin') {
     header('Location: admin.php');
@@ -129,6 +139,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 // Data for page
 $lecturers = $conn->query("SELECT lecturer_id, username, full_name, teaching_level, is_active, created_at FROM lecturers ORDER BY created_at DESC");
+$lecturer_summary = [
+    'total_lecturers' => 0,
+    'active_lecturers' => 0,
+    'levels_covered' => 0,
+    'materials_linked' => 0,
+];
+$lecturer_summary_result = $conn->query("SELECT
+    (SELECT COUNT(*) FROM lecturers) AS total_lecturers,
+    (SELECT COUNT(*) FROM lecturers WHERE is_active = 1) AS active_lecturers,
+    (SELECT COUNT(DISTINCT teaching_level) FROM lecturers WHERE COALESCE(teaching_level, '') <> '') AS levels_covered,
+    (SELECT COUNT(*) FROM lecturer_materials) AS materials_linked");
+if ($lecturer_summary_result) {
+    $lecturer_summary = array_merge($lecturer_summary, $lecturer_summary_result->fetch_assoc() ?: []);
+}
 
 $selected_lecturer_id = intval($_GET['lecturer_id'] ?? 0);
 $selected_lecturer = null;
@@ -145,7 +169,7 @@ if ($selected_lecturer_id > 0) {
         }
     }
 
-    $stmt = $conn->prepare("SELECT b.book_id, b.book_title FROM lecturer_books lb JOIN books b ON b.book_id = lb.book_id WHERE lb.lecturer_id = ? ORDER BY b.book_title ASC");
+    $stmt = $conn->prepare("SELECT material_id, material_title, course_code FROM lecturer_materials WHERE lecturer_id = ? ORDER BY material_title ASC, course_code ASC");
     if ($stmt) {
         $stmt->bind_param('i', $selected_lecturer_id);
         $stmt->execute();
@@ -196,6 +220,39 @@ if ($selected_lecturer_id > 0) {
 
         .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
         @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 16px;
+            margin-bottom: 22px;
+        }
+        .summary-card {
+            background: white;
+            border-radius: 16px;
+            padding: 18px 20px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+            border: 1px solid #eef2f7;
+        }
+        .summary-label {
+            color: #64748b;
+            font-size: 12px;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: .06em;
+            margin-bottom: 8px;
+        }
+        .summary-value {
+            color: #111827;
+            font-size: 30px;
+            font-weight: 800;
+            line-height: 1;
+            margin-bottom: 6px;
+        }
+        .summary-note {
+            color: #64748b;
+            font-size: 13px;
+            line-height: 1.5;
+        }
 
         .card {
             background: white;
@@ -250,6 +307,22 @@ if ($selected_lecturer_id > 0) {
             border-bottom: 2px solid #e9ecef;
         }
         td { padding: 12px; border-bottom: 1px solid #f0f0f0; font-size: 14px; }
+        .status-pill {
+            display: inline-flex;
+            padding: 5px 10px;
+            border-radius: 999px;
+            font-size: 11px;
+            font-weight: 800;
+            text-transform: uppercase;
+        }
+        .status-pill.active { background: #dcfce7; color: #166534; }
+        .status-pill.inactive { background: #fee2e2; color: #991b1b; }
+        @media (max-width: 900px) {
+            .summary-grid { grid-template-columns: 1fr 1fr; }
+        }
+        @media (max-width: 640px) {
+            .summary-grid { grid-template-columns: 1fr; }
+        }
     </style>
 </head>
 <body>
@@ -257,10 +330,10 @@ if ($selected_lecturer_id > 0) {
 <div class="page-container">
     <div class="page-header">
         <div>
-            <h1>🎓 Manage Lecturers</h1>
+            <h1>&#127891; Manage Lecturers</h1>
             <div style="opacity:0.9; font-size: 13px; margin-top: 6px;">Create lecturers and view their selected course materials</div>
         </div>
-        <a href="admin.php" class="back-btn">← Back</a>
+        <a href="admin.php" class="back-btn">&larr; Back</a>
     </div>
 
     <?php if ($success_msg): ?>
@@ -269,6 +342,29 @@ if ($selected_lecturer_id > 0) {
     <?php if ($error_msg): ?>
         <div class="alert alert-error"><?php echo htmlspecialchars($error_msg); ?></div>
     <?php endif; ?>
+
+    <div class="summary-grid">
+        <div class="summary-card">
+            <div class="summary-label">Total Lecturers</div>
+            <div class="summary-value"><?php echo intval($lecturer_summary['total_lecturers'] ?? 0); ?></div>
+            <div class="summary-note">All lecturer accounts currently created in the system.</div>
+        </div>
+        <div class="summary-card">
+            <div class="summary-label">Active Lecturers</div>
+            <div class="summary-value"><?php echo intval($lecturer_summary['active_lecturers'] ?? 0); ?></div>
+            <div class="summary-note">Lecturer accounts that can currently log in and work.</div>
+        </div>
+        <div class="summary-card">
+            <div class="summary-label">Levels Covered</div>
+            <div class="summary-value"><?php echo intval($lecturer_summary['levels_covered'] ?? 0); ?></div>
+            <div class="summary-note">Distinct teaching levels currently represented.</div>
+        </div>
+        <div class="summary-card">
+            <div class="summary-label">Linked Materials</div>
+            <div class="summary-value"><?php echo intval($lecturer_summary['materials_linked'] ?? 0); ?></div>
+            <div class="summary-note">Course materials registered by lecturers for matching.</div>
+        </div>
+    </div>
 
     <div class="grid">
         <div>
@@ -324,7 +420,11 @@ if ($selected_lecturer_id > 0) {
                                     <td><strong><?php echo htmlspecialchars($l['username']); ?></strong></td>
                                     <td><?php echo htmlspecialchars($l['full_name']); ?></td>
                                     <td><?php echo htmlspecialchars((strval($l['teaching_level'] ?? '') !== '' ? strval($l['teaching_level']) : '-')); ?></td>
-                                    <td><?php echo intval($l['is_active']) === 1 ? 'Active' : 'Inactive'; ?></td>
+                                    <td>
+                                        <span class="status-pill <?php echo intval($l['is_active']) === 1 ? 'active' : 'inactive'; ?>">
+                                            <?php echo intval($l['is_active']) === 1 ? 'Active' : 'Inactive'; ?>
+                                        </span>
+                                    </td>
                                     <td>
                                         <a class="btn btn-warning btn-sm" href="?lecturer_id=<?php echo intval($l['lecturer_id']); ?>">Manage</a>
                                         <form method="POST" style="display:inline;" onsubmit="return confirm('Toggle lecturer active status?');">
@@ -394,18 +494,20 @@ if ($selected_lecturer_id > 0) {
                     <table>
                         <thead>
                             <tr>
-                                <th>Book</th>
+                                <th>Material</th>
+                                <th>Course Code</th>
                             </tr>
                         </thead>
                         <tbody>
                             <?php if ($assigned_books && $assigned_books->num_rows > 0): ?>
                                 <?php while ($ab = $assigned_books->fetch_assoc()): ?>
                                     <tr>
-                                        <td><?php echo htmlspecialchars($ab['book_title']); ?></td>
+                                        <td><?php echo htmlspecialchars($ab['material_title']); ?></td>
+                                        <td><?php echo htmlspecialchars($ab['course_code']); ?></td>
                                     </tr>
                                 <?php endwhile; ?>
                             <?php else: ?>
-                                <tr><td colspan="1" style="color:#666;">No materials selected yet.</td></tr>
+                                <tr><td colspan="2" style="color:#666;">No materials selected yet.</td></tr>
                             <?php endif; ?>
                         </tbody>
                     </table>
@@ -423,3 +525,4 @@ if ($selected_lecturer_id > 0) {
 
 </body>
 </html>
+

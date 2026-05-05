@@ -39,6 +39,7 @@ $tables = [
     'books_received',
     'class_students',
     'balance_returns',
+    'semester_balance_carry_forwards',
 ];
 
 function ensure_trigger(mysqli $conn, string $triggerName, string $timing, string $table): void {

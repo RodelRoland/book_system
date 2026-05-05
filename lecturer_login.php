@@ -1,5 +1,6 @@
 <?php
-session_start();
+require_once __DIR__ . '/security_bootstrap.php';
+book_system_secure_session_start();
 error_reporting(0);
 require_once 'db.php';
 if (file_exists(__DIR__ . '/setup_tasks.php')) {
@@ -29,34 +30,43 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $username = trim($_POST['username'] ?? '');
         $password = $_POST['password'] ?? '';
 
-        $stmt = $conn->prepare("SELECT lecturer_id, username, password_hash, full_name, teaching_level, is_active FROM lecturers WHERE username = ? LIMIT 1");
-        if ($stmt) {
-            $stmt->bind_param('s', $username);
-            $stmt->execute();
-            $res = $stmt->get_result();
-            $lecturer = ($res && $res->num_rows === 1) ? $res->fetch_assoc() : null;
-
-            if (!$lecturer) {
-                $error = 'Invalid username or password.';
-            } elseif (intval($lecturer['is_active'] ?? 0) !== 1) {
-                $error = 'Your account has been deactivated. Contact the administrator.';
-            } elseif (!password_verify($password, strval($lecturer['password_hash'] ?? ''))) {
-                $error = 'Invalid username or password.';
-            } else {
-                @session_regenerate_id(true);
-                $_SESSION['lecturer_logged_in'] = 1;
-                $_SESSION['lecturer_id'] = intval($lecturer['lecturer_id']);
-                $_SESSION['lecturer_username'] = $lecturer['username'];
-                $_SESSION['lecturer_full_name'] = $lecturer['full_name'];
-                $_SESSION['lecturer_teaching_level'] = function_exists('book_system_normalize_teaching_level')
-                    ? book_system_normalize_teaching_level($lecturer['teaching_level'] ?? '')
-                    : preg_replace('/[^0-9]/', '', strval($lecturer['teaching_level'] ?? ''));
-
-                header('Location: lecturer_dashboard.php');
-                exit;
-            }
+        if (book_system_is_login_rate_limited($conn, 'lecturer', $username)) {
+            $error = 'Too many login attempts. Please wait a few minutes and try again.';
         } else {
-            $error = 'Database error. Please try again.';
+            $stmt = $conn->prepare("SELECT lecturer_id, username, password_hash, full_name, teaching_level, is_active FROM lecturers WHERE username = ? LIMIT 1");
+            if ($stmt) {
+                $stmt->bind_param('s', $username);
+                $stmt->execute();
+                $res = $stmt->get_result();
+                $lecturer = ($res && $res->num_rows === 1) ? $res->fetch_assoc() : null;
+
+                if (!$lecturer) {
+                    $error = 'Invalid username or password.';
+                } elseif (intval($lecturer['is_active'] ?? 0) !== 1) {
+                    $error = 'Your account has been deactivated. Contact the administrator.';
+                } elseif (!password_verify($password, strval($lecturer['password_hash'] ?? ''))) {
+                    $error = 'Invalid username or password.';
+                } else {
+                    book_system_secure_session_regenerate(true);
+                    book_system_record_login_attempt($conn, 'lecturer', $username, true);
+                    $_SESSION['lecturer_logged_in'] = 1;
+                    $_SESSION['lecturer_id'] = intval($lecturer['lecturer_id']);
+                    $_SESSION['lecturer_username'] = $lecturer['username'];
+                    $_SESSION['lecturer_full_name'] = $lecturer['full_name'];
+                    $_SESSION['lecturer_teaching_level'] = function_exists('book_system_normalize_teaching_level')
+                        ? book_system_normalize_teaching_level($lecturer['teaching_level'] ?? '')
+                        : preg_replace('/[^0-9]/', '', strval($lecturer['teaching_level'] ?? ''));
+
+                    header('Location: lecturer_dashboard.php');
+                    exit;
+                }
+            } else {
+                $error = 'Database error. Please try again.';
+            }
+
+            if ($error !== '') {
+                book_system_record_login_attempt($conn, 'lecturer', $username, false);
+            }
         }
     }
 }

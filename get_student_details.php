@@ -1,5 +1,6 @@
-<?php
-session_start();
+﻿<?php
+require_once __DIR__ . '/security_bootstrap.php';
+book_system_secure_session_start();
 require_once 'db.php';
 
 header('Content-Type: application/json');
@@ -31,3 +32,4 @@ if (isset($_GET['index'])) {
 } else {
     echo json_encode(null);
 }
+

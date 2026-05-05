@@ -1,5 +1,6 @@
-<?php
-session_start();
+﻿<?php
+require_once __DIR__ . '/security_bootstrap.php';
+book_system_secure_session_start();
 error_reporting(0);
 require_once 'db.php';
 if (file_exists(__DIR__ . '/setup_tasks.php')) {
@@ -184,7 +185,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <div class="wrapper">
     <div class="card">
         <div class="header">
-            <div class="icon">🎓</div>
+            <div class="icon">&#127891;</div>
             <h2>Lecturer Sign Up</h2>
             <p>Create your lecturer account</p>
         </div>
@@ -246,3 +247,4 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 </body>
 </html>
+

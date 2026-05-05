@@ -1,5 +1,6 @@
 ﻿<?php
-session_start();
+require_once __DIR__ . '/security_bootstrap.php';
+book_system_secure_session_start();
 if (!isset($_SESSION['admin_logged_in'])) {
     header('Location: admin.php');
     exit;
@@ -9,9 +10,20 @@ include 'db.php';
 $semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
 
 // Get current admin info for filtering
-$current_admin_id = intval($_SESSION['admin_id'] ?? 0);
-$current_admin_role = $_SESSION['admin_role'] ?? 'rep';
-$is_super_admin = ($current_admin_role === 'super_admin');
+$access_context = function_exists('book_system_get_effective_rep_access_context')
+    ? book_system_get_effective_rep_access_context($conn)
+    : null;
+$session_role = strval($_SESSION['admin_role'] ?? 'rep');
+if (!$access_context) {
+    header('Location: ' . ($session_role === 'super_admin' ? 'manage_reps.php?msg=rep_private' : 'login.php'));
+    exit;
+}
+$current_admin_id = intval($access_context['effective_admin_id'] ?? 0);
+$current_admin_role = 'rep';
+$is_super_admin = false;
+$dashboard_url = (($access_context['session_role'] ?? '') === 'super_admin' && empty($access_context['is_workspace_mode']))
+    ? 'admin.php'
+    : 'rep_dashboard.php';
 
 $page = max(1, intval($_GET['page'] ?? 1));
 $per_page = 100;
@@ -108,10 +120,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['return_balance'], $_P
 
 // 1. Capture search input
 $search = isset($_GET['search']) ? trim($_GET['search']) : '';
+$request_day = trim(strval($_GET['request_day'] ?? ''));
+$notification_view = isset($_GET['notification_view']) && $_GET['notification_view'] === '1';
+$request_day_is_valid = false;
+if ($request_day !== '') {
+    $day_obj = DateTime::createFromFormat('Y-m-d', $request_day);
+    $request_day_is_valid = ($day_obj && $day_obj->format('Y-m-d') === $request_day);
+    if (!$request_day_is_valid) {
+        $request_day = '';
+    }
+}
 
 $collection_filter = isset($_GET['collection_filter']) ? $_GET['collection_filter'] : 'all';
 if (!in_array($collection_filter, ['all', 'not_taken'], true)) {
     $collection_filter = 'all';
+}
+
+if (!$is_super_admin && $notification_view) {
+    $mark_sql = "UPDATE requests SET rep_viewed_at = NOW() WHERE semester_id = ? AND admin_id = ? AND rep_viewed_at IS NULL";
+    if ($request_day !== '') {
+        $mark_sql .= " AND DATE(created_at) = ?";
+    }
+    $mark_stmt = $conn->prepare($mark_sql);
+    if ($mark_stmt) {
+        if ($request_day !== '') {
+            $mark_stmt->bind_param('iis', $semester_id, $current_admin_id, $request_day);
+        } else {
+            $mark_stmt->bind_param('ii', $semester_id, $current_admin_id);
+        }
+        $mark_stmt->execute();
+        $mark_stmt->close();
+    }
 }
 
 // 2. Two-phase query for speed:
@@ -129,8 +168,13 @@ if ($collection_filter === 'not_taken') {
     $ids_sql .= " AND EXISTS (
         SELECT 1 FROM request_items ri2
         WHERE ri2.request_id = r.request_id
+          AND COALESCE(ri2.is_cancelled, 0) = 0
           AND (ri2.is_collected = 0 OR ri2.is_collected IS NULL)
     )";
+}
+
+if ($request_day !== '') {
+    $ids_sql .= " AND DATE(r.created_at) = ?";
 }
 
 if ($search !== '') {
@@ -154,15 +198,31 @@ $stmt = $conn->prepare($ids_sql);
 $request_ids = [];
 if ($is_super_admin) {
     if ($search !== '') {
-        $stmt->bind_param("issssii", $semester_id, $search_pattern, $search_pattern, $search_pattern, $search_pattern, $per_page, $offset);
+        if ($request_day !== '') {
+            $stmt->bind_param("isssssii", $semester_id, $request_day, $search_pattern, $search_pattern, $search_pattern, $search_pattern, $per_page, $offset);
+        } else {
+            $stmt->bind_param("issssii", $semester_id, $search_pattern, $search_pattern, $search_pattern, $search_pattern, $per_page, $offset);
+        }
     } else {
-        $stmt->bind_param("iii", $semester_id, $per_page, $offset);
+        if ($request_day !== '') {
+            $stmt->bind_param("isii", $semester_id, $request_day, $per_page, $offset);
+        } else {
+            $stmt->bind_param("iii", $semester_id, $per_page, $offset);
+        }
     }
 } else {
     if ($search !== '') {
-        $stmt->bind_param("iissssii", $semester_id, $current_admin_id, $search_pattern, $search_pattern, $search_pattern, $search_pattern, $per_page, $offset);
+        if ($request_day !== '') {
+            $stmt->bind_param("iisssssii", $semester_id, $current_admin_id, $request_day, $search_pattern, $search_pattern, $search_pattern, $search_pattern, $per_page, $offset);
+        } else {
+            $stmt->bind_param("iissssii", $semester_id, $current_admin_id, $search_pattern, $search_pattern, $search_pattern, $search_pattern, $per_page, $offset);
+        }
     } else {
-        $stmt->bind_param("iiii", $semester_id, $current_admin_id, $per_page, $offset);
+        if ($request_day !== '') {
+            $stmt->bind_param("iisii", $semester_id, $current_admin_id, $request_day, $per_page, $offset);
+        } else {
+            $stmt->bind_param("iiii", $semester_id, $current_admin_id, $per_page, $offset);
+        }
     }
 }
 $stmt->execute();
@@ -182,8 +242,17 @@ if (count($request_ids) > 0) {
                 r.total_amount, r.amount_paid, r.credit_used, r.payment_status, r.created_at,
                 COALESCE(br.refunded_amount, 0) AS refunded_amount,
                 br.last_return_date,
-                SUM(CASE WHEN ri.is_collected = 0 OR ri.is_collected IS NULL THEN 1 ELSE 0 END) AS pending_items,
-                GROUP_CONCAT(CONCAT(ri.item_id, ':', b.book_title, ':', ri.is_collected) SEPARATOR '|' ) AS books_data
+                COALESCE(cf.carried_forward_amount, 0) AS carried_forward_amount,
+                cf.last_carried_at,
+                SUM(CASE WHEN COALESCE(ri.is_cancelled, 0) = 0 AND (ri.is_collected = 0 OR ri.is_collected IS NULL) THEN 1 ELSE 0 END) AS pending_items,
+                GROUP_CONCAT(CONCAT_WS('~',
+                    ri.item_id,
+                    REPLACE(COALESCE(b.book_title, ''), '~', '-'),
+                    COALESCE(ri.is_collected, 0),
+                    COALESCE(ri.is_cancelled, 0),
+                    COALESCE(ri.cash_refunded_amount, 0),
+                    COALESCE(ri.credit_refunded_amount, 0)
+                ) SEPARATOR '|' ) AS books_data
             FROM requests r
             JOIN students s ON r.student_id = s.student_id
             LEFT JOIN request_items ri ON r.request_id = ri.request_id
@@ -195,6 +264,11 @@ if (count($request_ids) > 0) {
                 WHERE request_id IS NOT NULL
                 GROUP BY request_id
             ) br ON r.request_id = br.request_id
+            LEFT JOIN (
+                SELECT request_id, SUM(amount) AS carried_forward_amount, MAX(carried_at) AS last_carried_at
+                FROM semester_balance_carry_forwards
+                GROUP BY request_id
+            ) cf ON r.request_id = cf.request_id
             WHERE r.request_id IN ($ids_in)
               AND r.semester_id = ?
               " . ($is_super_admin ? '' : "AND r.admin_id = ?") . "
@@ -351,6 +425,7 @@ $csrf_token = csrf_get_token();
         .tag-pending:hover { background: #ffc107; color: #333; }
         .tag-collected { background: #d4edda; color: #155724; border: 1px solid #28a745; }
         .tag-collected:hover { background: #28a745; color: white; }
+        .tag-cancelled { background: #e5e7eb; color: #4b5563; border: 1px solid #9ca3af; cursor: default; }
         
         .status-badge {
             display: inline-block;
@@ -431,7 +506,7 @@ $csrf_token = csrf_get_token();
             <h1><i class="bi bi-inbox"></i> Student Requests</h1>
             <p class="subtitle">Manage orders, payments & book collection</p>
         </div>
-        <a href="admin.php" class="back-btn"><i class="bi bi-arrow-left"></i> Back to Dashboard</a>
+        <a href="<?= htmlspecialchars($dashboard_url) ?>" class="back-btn"><i class="bi bi-arrow-left"></i> Back to Dashboard</a>
     </div>
     
     <div class="card">
@@ -441,7 +516,19 @@ $csrf_token = csrf_get_token();
         <?php if (isset($_GET['msg']) && $_GET['msg'] === 'toggle_failed'): ?>
             <div class="alert alert-error">Could not update collection status. Please try again. If it continues, check that the book has stock and exists in the database.</div>
         <?php endif; ?>
+        <?php if (isset($_GET['msg']) && $_GET['msg'] === 'cancelled_item'): ?>
+            <div class="alert alert-warning">Cancelled items cannot be marked as collected.</div>
+        <?php endif; ?>
+        <?php if ($request_day !== ''): ?>
+            <div class="alert alert-warning">Showing requests for <?php echo htmlspecialchars($request_day); ?>.</div>
+        <?php endif; ?>
         <form method="GET" class="search-section">
+            <?php if ($request_day !== ''): ?>
+                <input type="hidden" name="request_day" value="<?php echo htmlspecialchars($request_day); ?>">
+            <?php endif; ?>
+            <?php if ($notification_view): ?>
+                <input type="hidden" name="notification_view" value="1">
+            <?php endif; ?>
             <input type="text" name="search" class="search-input" placeholder="Search by name, index, phone, or book" 
                    value="<?php echo htmlspecialchars($search); ?>">
             <select name="collection_filter" class="search-input" style="max-width: 200px;">
@@ -450,10 +537,12 @@ $csrf_token = csrf_get_token();
             </select>
             <button type="submit" class="btn btn-primary"><i class="bi bi-search"></i> Search</button>
             <?php if (!empty($search)): ?>
-                <a href="view_request.php?collection_filter=<?php echo urlencode($collection_filter); ?>" class="btn btn-secondary">Clear</a>
-                <a href="export_excel.php?search=<?php echo urlencode($search); ?>&collection_filter=<?php echo urlencode($collection_filter); ?>" class="btn btn-success"><i class="bi bi-download"></i> Export</a>
+                <a href="view_request.php?<?php echo http_build_query(array_filter(['collection_filter' => $collection_filter, 'request_day' => $request_day, 'notification_view' => $notification_view ? '1' : ''])); ?>" class="btn btn-secondary">Clear</a>
+                <a href="export_excel.php?search=<?php echo urlencode($search); ?>&collection_filter=<?php echo urlencode($collection_filter); ?><?php echo $request_day !== '' ? '&request_day=' . urlencode($request_day) : ''; ?>" class="btn btn-success"><i class="bi bi-download"></i> Export</a>
             <?php elseif ($collection_filter !== 'all'): ?>
-                <a href="view_request.php" class="btn btn-secondary">Clear</a>
+                <a href="view_request.php?<?php echo http_build_query(array_filter(['request_day' => $request_day, 'notification_view' => $notification_view ? '1' : ''])); ?>" class="btn btn-secondary">Clear</a>
+            <?php elseif ($request_day !== ''): ?>
+                <a href="view_request.php" class="btn btn-secondary">Clear Day Filter</a>
             <?php endif; ?>
         </form>
         
@@ -483,6 +572,8 @@ $csrf_token = csrf_get_token();
                         $debit_amount = max(0, $due_after_credit - $amount_paid);
                         $overpaid_amount = $cash_overpaid;
                         $refunded_amount = max(0, floatval($row['refunded_amount'] ?? 0));
+                        $carried_forward_amount = max(0, floatval($row['carried_forward_amount'] ?? 0));
+                        $remaining_balance = max(0, $overpaid_amount - $refunded_amount - $carried_forward_amount);
                     ?>
                     <tr>
                         <td><?php echo date('M d', strtotime($row['created_at'])); ?></td>
@@ -498,9 +589,21 @@ $csrf_token = csrf_get_token();
                             if ($row['books_data']) {
                                 $books = explode('|', $row['books_data']);
                                 foreach ($books as $book) {
-                                    $parts = explode(':', $book);
-                                    if(count($parts) == 3) {
-                                        list($item_id, $title, $is_collected) = $parts;
+                                    $parts = explode('~', $book);
+                                    if(count($parts) >= 6) {
+                                        list($item_id, $title, $is_collected, $is_cancelled, $cash_refunded_amount, $credit_refunded_amount) = $parts;
+                                        if (intval($is_cancelled) === 1) {
+                                            $refundBits = [];
+                                            if (floatval($cash_refunded_amount) > 0) {
+                                                $refundBits[] = 'Cash GH&#8373; ' . number_format(floatval($cash_refunded_amount), 2);
+                                            }
+                                            if (floatval($credit_refunded_amount) > 0) {
+                                                $refundBits[] = 'Credit GH&#8373; ' . number_format(floatval($credit_refunded_amount), 2);
+                                            }
+                                            $refundText = !empty($refundBits) ? ' - ' . implode(' | ', $refundBits) : ' - Refunded';
+                                            echo "<span class='book-tag tag-cancelled'><i class='bi bi-x-circle'></i> " . htmlspecialchars($title) . $refundText . "</span>";
+                                            continue;
+                                        }
                                         $tagClass = ($is_collected == 1) ? 'tag-collected' : 'tag-pending';
                                         $icon = ($is_collected == 1) ? '<i class="bi bi-check-lg"></i>' : '<i class="bi bi-circle"></i>';
                                         $item_id_int = intval($item_id);
@@ -532,17 +635,22 @@ $csrf_token = csrf_get_token();
                                 <?php if (!empty($row['last_return_date'])): ?>
                                     <div class="index" style="margin-top:4px;"><?php echo date('M d, Y', strtotime($row['last_return_date'])); ?></div>
                                 <?php endif; ?>
+                            <?php elseif ($carried_forward_amount > 0): ?>
+                                <div class="credit-amt">Carried Forward: GH&#8373; <?php echo number_format($carried_forward_amount, 2); ?></div>
+                                <?php if (!empty($row['last_carried_at'])): ?>
+                                    <div class="index" style="margin-top:4px;"><?php echo date('M d, Y', strtotime($row['last_carried_at'])); ?></div>
+                                <?php endif; ?>
                             <?php elseif ($debit_amount > 0): ?>
                                 <div class="debit-amt">Owes: GH&#8373; <?php echo number_format($debit_amount, 2); ?></div>
-                            <?php elseif ($cash_overpaid > 0): ?>
-                                <div class="credit-amt">Balance: GH&#8373; <?php echo number_format($cash_overpaid, 2); ?></div>
+                            <?php elseif ($remaining_balance > 0): ?>
+                                <div class="credit-amt">Balance: GH&#8373; <?php echo number_format($remaining_balance, 2); ?></div>
                             <?php else: ?>
                                 <span class="zero-amt">&mdash;</span>
                             <?php endif; ?>
                         </td>
                         <td>
                             <a href="edit_request.php?id=<?php echo $row['request_id']; ?>" class="action-btn action-edit" title="Edit"><i class="bi bi-pencil-square"></i></a>
-                            <?php if ($refunded_amount <= 0 && $overpaid_amount > 0): ?>
+                            <?php if ($remaining_balance > 0): ?>
                                 <form method="POST" class="inline-action-form" onsubmit="return confirm('Mark this balance as returned to the student?');">
                                     <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
                                     <input type="hidden" name="return_balance" value="1">
@@ -633,5 +741,6 @@ document.addEventListener('DOMContentLoaded', function() {
 
 </body>
 </html>
+
 
 

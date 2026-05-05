@@ -1,6 +1,13 @@
-<?php
-session_start();
+﻿<?php
+require_once __DIR__ . '/security_bootstrap.php';
+book_system_secure_session_start();
 require_once 'db.php';
+if (file_exists(__DIR__ . '/setup_tasks.php')) {
+    require_once __DIR__ . '/setup_tasks.php';
+    if (function_exists('book_system_setup_ensure_column')) {
+        book_system_setup_ensure_column($conn, 'request_items', 'is_cancelled', 'TINYINT(1) NOT NULL DEFAULT 0 AFTER is_collected');
+    }
+}
 
 header('Content-Type: application/json');
 
@@ -38,6 +45,7 @@ if (isset($_GET['index'])) {
         JOIN requests r ON ri.request_id = r.request_id
         JOIN students s ON r.student_id = s.student_id
         WHERE s.index_number = ? AND r.semester_id = ?
+          AND COALESCE(ri.is_cancelled, 0) = 0
     ";
 
     if (!$is_super_admin) {
@@ -68,3 +76,4 @@ if (isset($_GET['index'])) {
     echo json_encode([]);
 }
 ?>
+

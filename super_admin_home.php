@@ -1,5 +1,6 @@
-<?php
-session_start();
+﻿<?php
+require_once __DIR__ . '/security_bootstrap.php';
+book_system_secure_session_start();
 require_once 'db.php';
 
 if (!isset($_SESSION['admin_logged_in']) || ($_SESSION['admin_role'] ?? '') !== 'super_admin') {
@@ -11,6 +12,13 @@ $current_admin_name = $_SESSION['admin_full_name'] ?? $_SESSION['admin_username'
 $csrf_token = csrf_get_token();
 $success_msg = '';
 $error_msg = '';
+
+if (file_exists(__DIR__ . '/setup_tasks.php')) {
+    require_once __DIR__ . '/setup_tasks.php';
+    if (function_exists('book_system_setup_ensure_column')) {
+        book_system_setup_ensure_column($conn, 'semesters', 'semester_start_date', 'DATE NULL AFTER semester_name');
+    }
+}
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['logout'])) {
     if (!csrf_validate($_POST['csrf_token'] ?? null)) {
@@ -53,13 +61,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['create_semester'])) {
         $error_msg = 'Invalid request. Please refresh and try again.';
     } else {
         $semester_name = substr(trim(strval($_POST['semester_name'] ?? '')), 0, 30);
+        $semester_start_date = trim(strval($_POST['semester_start_date'] ?? ''));
+        $date_object = DateTime::createFromFormat('Y-m-d', $semester_start_date);
         if ($semester_name === '') {
             $error_msg = 'Enter a semester name before continuing.';
+        } elseif (!$date_object || $date_object->format('Y-m-d') !== $semester_start_date) {
+            $error_msg = 'Choose a valid semester start date before continuing.';
         } else {
             $conn->query("UPDATE semesters SET is_active = 0");
-            $stmt = $conn->prepare("INSERT INTO semesters (semester_name, is_active) VALUES (?, 1) ON DUPLICATE KEY UPDATE is_active = 1");
+            $stmt = $conn->prepare("INSERT INTO semesters (semester_name, semester_start_date, is_active) VALUES (?, ?, 1) ON DUPLICATE KEY UPDATE semester_start_date = VALUES(semester_start_date), is_active = 1");
             if ($stmt) {
-                $stmt->bind_param('s', $semester_name);
+                $stmt->bind_param('ss', $semester_name, $semester_start_date);
                 $stmt->execute();
                 $new_semester_id = intval($conn->insert_id);
                 if ($new_semester_id <= 0) {
@@ -73,11 +85,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['create_semester'])) {
                         }
                     }
                 }
+                $carry_forward_summary = function_exists('book_system_run_balance_carry_forward')
+                    ? book_system_run_balance_carry_forward($conn, $new_semester_id)
+                    : ['carried_count' => 0, 'carried_total' => 0.0];
                 if (function_exists('book_system_audit_log')) {
                     book_system_audit_log($conn, 'create_semester', 'semester', $new_semester_id, [
                         'semester_name' => $semester_name,
+                        'semester_start_date' => $semester_start_date,
+                        'carried_balance_count' => intval($carry_forward_summary['carried_count'] ?? 0),
+                        'carried_balance_total' => floatval($carry_forward_summary['carried_total'] ?? 0),
                         'source' => 'super_admin_home',
                     ]);
+                    if (floatval($carry_forward_summary['carried_total'] ?? 0) > 0) {
+                        book_system_audit_log($conn, 'carry_forward_balance', 'semester', $new_semester_id, [
+                            'target_semester_id' => $new_semester_id,
+                            'carried_balance_count' => intval($carry_forward_summary['carried_count'] ?? 0),
+                            'carried_balance_total' => floatval($carry_forward_summary['carried_total'] ?? 0),
+                            'source' => 'super_admin_home',
+                        ]);
+                    }
                 }
             }
             header('Location: admin.php');
@@ -89,10 +115,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['create_semester'])) {
 $active_semester_name = function_exists('book_system_get_active_semester_name')
     ? book_system_get_active_semester_name($conn)
     : '';
+$active_semester_start_date = '';
+$active_semester_meta_stmt = $conn->prepare("SELECT semester_start_date FROM semesters WHERE is_active = 1 ORDER BY semester_id DESC LIMIT 1");
+if ($active_semester_meta_stmt) {
+    $active_semester_meta_stmt->execute();
+    $active_semester_meta_result = $active_semester_meta_stmt->get_result();
+    if ($active_semester_meta_result && $active_semester_meta_result->num_rows === 1) {
+        $active_semester_start_date = strval($active_semester_meta_result->fetch_assoc()['semester_start_date'] ?? '');
+    }
+    $active_semester_meta_stmt->close();
+}
 $active_semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
 
 $semesters = [];
-$semesters_result = $conn->query("SELECT semester_id, semester_name, is_active, created_at FROM semesters ORDER BY semester_id DESC");
+$semesters_result = $conn->query("SELECT semester_id, semester_name, semester_start_date, is_active, created_at FROM semesters ORDER BY semester_id DESC");
 if ($semesters_result) {
     while ($row = $semesters_result->fetch_assoc()) {
         $semesters[] = $row;
@@ -381,7 +417,12 @@ if ($count_result && $count_result->num_rows === 1) {
     <div class="dashboard-header">
         <div>
             <h1>Welcome, <?php echo htmlspecialchars($current_admin_name); ?></h1>
-            <p class="subtitle"><?php echo $active_semester_name !== '' ? htmlspecialchars($active_semester_name) : 'No active semester'; ?></p>
+            <p class="subtitle">
+                <?php echo $active_semester_name !== '' ? htmlspecialchars($active_semester_name) : 'No active semester'; ?>
+                <?php if ($active_semester_start_date !== ''): ?>
+                    <?php echo ' • Starts ' . htmlspecialchars(date('M d, Y', strtotime($active_semester_start_date))); ?>
+                <?php endif; ?>
+            </p>
         </div>
         <div class="header-actions">
             <a href="admin.php" class="btn btn-light">Open Dashboard</a>
@@ -433,7 +474,11 @@ if ($count_result && $count_result->num_rows === 1) {
                                         <span class="badge badge-active">Active</span>
                                     <?php endif; ?>
                                 </div>
-                                <div class="meta">Created: <?php echo htmlspecialchars(date('M d, Y', strtotime(strval($semester['created_at'] ?? 'now')))); ?></div>
+                                <div class="meta">
+                                    Starts: <?php echo !empty($semester['semester_start_date']) ? htmlspecialchars(date('M d, Y', strtotime(strval($semester['semester_start_date'])))) : 'Not set'; ?>
+                                    &nbsp;&middot;&nbsp;
+                                    Created: <?php echo htmlspecialchars(date('M d, Y', strtotime(strval($semester['created_at'] ?? 'now')))); ?>
+                                </div>
                             </div>
                             <form method="POST" class="inline-form">
                                 <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
@@ -457,6 +502,10 @@ if ($count_result && $count_result->num_rows === 1) {
                     <label for="semester_name">New Semester Name</label>
                     <input type="text" id="semester_name" name="semester_name" placeholder="e.g. 2026/2027 First Semester" required>
                 </div>
+                <div class="form-group">
+                    <label for="semester_start_date">Semester Start Date</label>
+                    <input type="date" id="semester_start_date" name="semester_start_date" required>
+                </div>
                 <div class="panel-footer">
                     <button type="submit" name="create_semester" value="1" class="btn btn-primary">Create and Start New Record</button>
                 </div>
@@ -466,3 +515,4 @@ if ($count_result && $count_result->num_rows === 1) {
 </div>
 </body>
 </html>
+

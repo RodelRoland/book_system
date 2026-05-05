@@ -1,5 +1,6 @@
-<?php
-session_start();
+﻿<?php
+require_once __DIR__ . '/security_bootstrap.php';
+book_system_secure_session_start();
 require_once 'db.php';
 
 if (!isset($_SESSION['admin_logged_in'])) {
@@ -7,12 +8,22 @@ if (!isset($_SESSION['admin_logged_in'])) {
     exit;
 }
 
-$current_admin_id = intval($_SESSION['admin_id'] ?? 0);
-$current_admin_role = $_SESSION['admin_role'] ?? 'rep';
-$is_super_admin = ($current_admin_role === 'super_admin');
+$access_context = function_exists('book_system_get_effective_rep_access_context')
+    ? book_system_get_effective_rep_access_context($conn)
+    : null;
+$session_role = strval($_SESSION['admin_role'] ?? 'rep');
+if (!$access_context) {
+    header('Location: ' . ($session_role === 'super_admin' ? 'manage_reps.php?msg=rep_private' : 'login.php'));
+    exit;
+}
+$current_admin_id = intval($access_context['effective_admin_id'] ?? 0);
+$current_admin_role = 'rep';
+$is_super_admin = false;
 $role_filter = trim(strval($_GET['role'] ?? ''));
 $role_filter = in_array($role_filter, ['super_admin', 'rep'], true) ? $role_filter : '';
-$back_link = $is_super_admin ? 'admin.php' : 'rep_dashboard.php';
+$back_link = (($access_context['session_role'] ?? '') === 'super_admin' && empty($access_context['is_workspace_mode']))
+    ? 'admin.php'
+    : 'rep_dashboard.php';
 
 $activity_rows = function_exists('book_system_fetch_recent_activity')
     ? book_system_fetch_recent_activity($conn, 100, $current_admin_id, $is_super_admin, $role_filter !== '' ? $role_filter : null)
@@ -43,6 +54,7 @@ function book_system_activity_label(array $activity): string {
     $map = [
         'set_active_semester' => 'Changed the active semester',
         'create_semester' => 'Created a semester',
+        'carry_forward_balance' => 'Carried forward student balances',
         'toggle_payment' => 'Toggled a request payment status',
         'toggle_collection' => 'Updated a book collection status',
         'mark_paid' => 'Marked a request as paid',
@@ -337,3 +349,4 @@ function book_system_activity_label(array $activity): string {
 <?php include 'footer.php'; ?>
 </body>
 </html>
+

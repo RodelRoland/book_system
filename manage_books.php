@@ -1,6 +1,14 @@
-<?php
-session_start();
+﻿<?php
+require_once __DIR__ . '/security_bootstrap.php';
+book_system_secure_session_start();
 require_once 'db.php';
+if (file_exists(__DIR__ . '/setup_tasks.php')) {
+    require_once __DIR__ . '/setup_tasks.php';
+    if (function_exists('book_system_setup_ensure_column')) {
+        book_system_setup_ensure_column($conn, 'books', 'course_code', 'VARCHAR(20) NULL AFTER book_title');
+        book_system_setup_ensure_column($conn, 'books', 'course_code_key', 'VARCHAR(20) NULL AFTER course_code');
+    }
+}
 
 /* Protect admin page */
 if (!isset($_SESSION['admin_logged_in'])) {
@@ -8,12 +16,21 @@ if (!isset($_SESSION['admin_logged_in'])) {
     exit;
 }
 
-if (($_SESSION['admin_role'] ?? '') !== 'super_admin') {
-    header("Location: admin.php");
+$current_admin_id = intval($_SESSION['admin_id'] ?? 0);
+$access_context = function_exists('book_system_get_effective_rep_access_context')
+    ? book_system_get_effective_rep_access_context($conn)
+    : null;
+$session_role = strval($_SESSION['admin_role'] ?? 'rep');
+if (!$access_context) {
+    header('Location: ' . ($session_role === 'super_admin' ? 'manage_reps.php?msg=rep_private' : 'login.php'));
     exit;
 }
-
-$current_admin_id = intval($_SESSION['admin_id'] ?? 0);
+$current_admin_id = intval($access_context['effective_admin_id'] ?? 0);
+$current_admin_role = 'rep';
+$is_super_admin = false;
+$dashboard_url = (($access_context['session_role'] ?? '') === 'super_admin' && empty($access_context['is_workspace_mode']))
+    ? 'admin.php'
+    : 'rep_dashboard.php';
 
 $semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
 $auto_assigned_count = 0;
@@ -25,7 +42,7 @@ $csrf_token = csrf_get_token();
  * Auto-assign a book to students who have sufficient credit balance.
  * Creates a paid request and deducts from their balance.
  */
-function auto_assign_book_to_students_with_balance($conn, $book_id, $book_price, $semester_id) {
+function auto_assign_book_to_students_with_balance($conn, $book_id, $book_price, $semester_id, $owner_admin_id = null) {
     $assigned_count = 0;
     $total_deducted = 0;
     
@@ -34,8 +51,13 @@ function auto_assign_book_to_students_with_balance($conn, $book_id, $book_price,
     }
     
     // Find students with credit_balance >= book_price
-    $stmt = $conn->prepare("SELECT student_id, full_name, credit_balance, admin_id FROM students WHERE credit_balance >= ?");
-    $stmt->bind_param("d", $book_price);
+    if ($owner_admin_id !== null && $owner_admin_id > 0) {
+        $stmt = $conn->prepare("SELECT student_id, full_name, credit_balance, admin_id FROM students WHERE credit_balance >= ? AND admin_id = ?");
+        $stmt->bind_param("di", $book_price, $owner_admin_id);
+    } else {
+        $stmt = $conn->prepare("SELECT student_id, full_name, credit_balance, admin_id FROM students WHERE credit_balance >= ?");
+        $stmt->bind_param("d", $book_price);
+    }
     $stmt->execute();
     $students = $stmt->get_result();
     
@@ -48,7 +70,7 @@ function auto_assign_book_to_students_with_balance($conn, $book_id, $book_price,
         $check_stmt = $conn->prepare("
             SELECT ri.item_id FROM request_items ri 
             JOIN requests r ON ri.request_id = r.request_id 
-            WHERE r.student_id = ? AND r.semester_id = ? AND ri.book_id = ? 
+            WHERE r.student_id = ? AND r.semester_id = ? AND ri.book_id = ? AND COALESCE(ri.is_cancelled, 0) = 0
             LIMIT 1
         ");
         $check_stmt->bind_param("iii", $student_id, $semester_id, $book_id);
@@ -104,19 +126,24 @@ if (isset($_POST['add_book'])) {
         exit;
     }
     $title = trim($_POST['book_title']);
+    $course_code = trim($_POST['course_code'] ?? '');
+    $course_code_key = function_exists('book_system_normalize_course_code')
+        ? book_system_normalize_course_code($course_code)
+        : strtoupper(preg_replace('/[^A-Za-z0-9]/', '', $course_code));
     $price = floatval($_POST['price']);
     $stock_quantity = intval($_POST['stock_quantity'] ?? 0);
     // Default to available - quantity is optional/for tracking only
     $availability = 'available';
 
-    $stmt = $conn->prepare("INSERT INTO books (book_title, price, stock_quantity, availability) VALUES (?, ?, ?, ?)");
-    $stmt->bind_param("sdis", $title, $price, $stock_quantity, $availability);
+    $stmt = $conn->prepare("INSERT INTO books (book_title, course_code, course_code_key, price, stock_quantity, availability, admin_id) VALUES (?, ?, ?, ?, ?, ?, ?)");
+    $stmt->bind_param("sssdisi", $title, $course_code, $course_code_key, $price, $stock_quantity, $availability, $current_admin_id);
     $stmt->execute();
     $new_book_id = $conn->insert_id;
 
     if (function_exists('book_system_audit_log') && $new_book_id > 0) {
         book_system_audit_log($conn, 'add_book', 'book', $new_book_id, [
             'book_title' => $title,
+            'course_code' => $course_code,
             'price' => $price,
             'stock_quantity' => $stock_quantity,
             'availability' => $availability,
@@ -127,7 +154,7 @@ if (isset($_POST['add_book'])) {
     
     // Auto-assign to students with sufficient balance if book is available
     if ($availability === 'available' && $price > 0) {
-        $result = auto_assign_book_to_students_with_balance($conn, $new_book_id, $price, $semester_id);
+        $result = auto_assign_book_to_students_with_balance($conn, $new_book_id, $price, $semester_id, $current_admin_id);
         $auto_assigned_count = $result['count'];
         $auto_assigned_total = $result['total'];
     }
@@ -140,6 +167,10 @@ if (isset($_POST['update_book'])) {
         exit;
     }
     $book_id = intval($_POST['book_id']);
+    $course_code = trim($_POST['course_code'] ?? '');
+    $course_code_key = function_exists('book_system_normalize_course_code')
+        ? book_system_normalize_course_code($course_code)
+        : strtoupper(preg_replace('/[^A-Za-z0-9]/', '', $course_code));
     $price = floatval($_POST['price']);
     $effective_date = trim(strval($_POST['effective_date'] ?? ''));
     $stock_quantity = intval($_POST['stock_quantity'] ?? 0);
@@ -160,11 +191,20 @@ if (isset($_POST['update_book'])) {
     // Only use the availability dropdown selection
 
     // Check if book was previously unavailable and is now being made available
-    $prev_stmt = $conn->prepare("SELECT availability, price FROM books WHERE book_id = ?");
-    $prev_stmt->bind_param("i", $book_id);
+    if ($is_super_admin) {
+        $prev_stmt = $conn->prepare("SELECT availability, price FROM books WHERE book_id = ?");
+        $prev_stmt->bind_param("i", $book_id);
+    } else {
+        $prev_stmt = $conn->prepare("SELECT availability, price FROM books WHERE book_id = ? AND (admin_id = ? OR admin_id IS NULL)");
+        $prev_stmt->bind_param("ii", $book_id, $current_admin_id);
+    }
     $prev_stmt->execute();
     $prev_result = $prev_stmt->get_result();
     $prev_book = $prev_result->fetch_assoc();
+    if (!$prev_book) {
+        header('Location: manage_books.php?msg=unauthorized');
+        exit;
+    }
     $was_unavailable = ($prev_book && $prev_book['availability'] === 'out_of_stock');
     $price_changed = ($prev_book && floatval($prev_book['price']) != $price);
     $old_price = $prev_book ? floatval($prev_book['price']) : null;
@@ -180,12 +220,22 @@ if (isset($_POST['update_book'])) {
     }
     
     if ($schedule_price_change) {
-        $upd_stmt = $conn->prepare("UPDATE books SET stock_quantity = ?, availability = ? WHERE book_id = ?");
-        $upd_stmt->bind_param("isi", $stock_quantity, $availability, $book_id);
+        if ($is_super_admin) {
+            $upd_stmt = $conn->prepare("UPDATE books SET course_code = ?, course_code_key = ?, stock_quantity = ?, availability = ? WHERE book_id = ?");
+            $upd_stmt->bind_param("ssisi", $course_code, $course_code_key, $stock_quantity, $availability, $book_id);
+        } else {
+            $upd_stmt = $conn->prepare("UPDATE books SET course_code = ?, course_code_key = ?, stock_quantity = ?, availability = ?, admin_id = COALESCE(admin_id, ?) WHERE book_id = ? AND (admin_id = ? OR admin_id IS NULL)");
+            $upd_stmt->bind_param("ssisiii", $course_code, $course_code_key, $stock_quantity, $availability, $current_admin_id, $book_id, $current_admin_id);
+        }
         $upd_stmt->execute();
     } else {
-        $upd_stmt = $conn->prepare("UPDATE books SET price = ?, stock_quantity = ?, availability = ? WHERE book_id = ?");
-        $upd_stmt->bind_param("disi", $price, $stock_quantity, $availability, $book_id);
+        if ($is_super_admin) {
+            $upd_stmt = $conn->prepare("UPDATE books SET course_code = ?, course_code_key = ?, price = ?, stock_quantity = ?, availability = ? WHERE book_id = ?");
+            $upd_stmt->bind_param("ssdisi", $course_code, $course_code_key, $price, $stock_quantity, $availability, $book_id);
+        } else {
+            $upd_stmt = $conn->prepare("UPDATE books SET course_code = ?, course_code_key = ?, price = ?, stock_quantity = ?, availability = ?, admin_id = COALESCE(admin_id, ?) WHERE book_id = ? AND (admin_id = ? OR admin_id IS NULL)");
+            $upd_stmt->bind_param("ssdisiii", $course_code, $course_code_key, $price, $stock_quantity, $availability, $current_admin_id, $book_id, $current_admin_id);
+        }
         $upd_stmt->execute();
     }
 
@@ -199,9 +249,23 @@ if (isset($_POST['update_book'])) {
     }
 
     if ($price_changed && $old_price !== null && !$schedule_price_change && $semester_id > 0) {
-        $upd_items = $conn->prepare("UPDATE request_items ri\n            JOIN requests r ON r.request_id = ri.request_id\n            SET ri.unit_price = ?\n            WHERE ri.book_id = ?\n              AND r.payment_status = 'unpaid'\n              AND r.semester_id = ?\n              AND DATE(r.created_at) >= ?");
+        $upd_items_sql = "UPDATE request_items ri
+            JOIN requests r ON r.request_id = ri.request_id
+            SET ri.unit_price = ?
+            WHERE ri.book_id = ?
+              AND r.payment_status = 'unpaid'
+              AND r.semester_id = ?
+              AND DATE(r.created_at) >= ?";
+        if (!$is_super_admin) {
+            $upd_items_sql .= " AND r.admin_id = ?";
+        }
+        $upd_items = $conn->prepare($upd_items_sql);
         if ($upd_items) {
-            $upd_items->bind_param('diis', $price, $book_id, $semester_id, $effective_date);
+            if ($is_super_admin) {
+                $upd_items->bind_param('diis', $price, $book_id, $semester_id, $effective_date);
+            } else {
+                $upd_items->bind_param('diisi', $price, $book_id, $semester_id, $effective_date, $current_admin_id);
+            }
             $upd_items->execute();
 
             $conn->query("UPDATE requests r\n                JOIN (SELECT request_id, SUM(COALESCE(unit_price, 0)) AS total_amount_calc FROM request_items GROUP BY request_id) x\n                    ON x.request_id = r.request_id\n                SET r.total_amount = x.total_amount_calc,\n                    r.payment_status = CASE WHEN (COALESCE(r.amount_paid,0) + COALESCE(r.credit_used,0)) >= COALESCE(x.total_amount_calc,0) THEN 'paid' ELSE 'unpaid' END\n                WHERE r.semester_id = " . intval($semester_id) . " AND r.payment_status = 'unpaid'");
@@ -212,7 +276,7 @@ if (isset($_POST['update_book'])) {
     
     // Auto-assign if book is now available (was unavailable OR price changed)
     if ($availability === 'available' && $price > 0 && ($was_unavailable || ($price_changed && !$schedule_price_change))) {
-        $result = auto_assign_book_to_students_with_balance($conn, $book_id, $price, $semester_id);
+        $result = auto_assign_book_to_students_with_balance($conn, $book_id, $price, $semester_id, $is_super_admin ? null : $current_admin_id);
         $auto_assigned_count = $result['count'];
         $auto_assigned_total = $result['total'];
     }
@@ -221,6 +285,7 @@ if (isset($_POST['update_book'])) {
         book_system_audit_log($conn, 'update_book', 'book', $book_id, [
             'old_price' => $old_price,
             'new_price' => $price,
+            'course_code' => $course_code,
             'stock_quantity' => $stock_quantity,
             'availability' => $availability,
             'effective_date' => $effective_date,
@@ -231,8 +296,8 @@ if (isset($_POST['update_book'])) {
     }
 }
 
-/* Fetch all books */
-$books = $conn->query("SELECT 
+/* Fetch books */
+$books_sql = "SELECT 
     b.*,
     (
         SELECT bph.new_price
@@ -254,8 +319,25 @@ $books = $conn->query("SELECT
         ORDER BY bph.effective_date DESC, bph.history_id DESC
         LIMIT 1
     ) AS scheduled_effective_date
-    FROM books b
-    ORDER BY b.book_title ASC");
+    FROM books b";
+
+if (!$is_super_admin) {
+    $books_sql .= " WHERE b.admin_id = ? OR b.admin_id IS NULL";
+}
+
+$books_sql .= " ORDER BY b.book_title ASC";
+
+if ($is_super_admin) {
+    $books = $conn->query($books_sql);
+} else {
+    $books_stmt = $conn->prepare($books_sql);
+    $books = false;
+    if ($books_stmt) {
+        $books_stmt->bind_param('i', $current_admin_id);
+        $books_stmt->execute();
+        $books = $books_stmt->get_result();
+    }
+}
 ?>
 
 <!DOCTYPE html>
@@ -274,7 +356,7 @@ $books = $conn->query("SELECT
         }
         
         .page-container {
-            max-width: 1000px;
+            width: min(1380px, calc(100vw - 40px));
             margin: 0 auto;
         }
         
@@ -307,18 +389,20 @@ $books = $conn->query("SELECT
         /* Grid Layout */
         .content-grid {
             display: grid;
-            grid-template-columns: 350px 1fr;
-            gap: 25px;
+            grid-template-columns: 315px minmax(0, 1fr);
+            gap: 20px;
+            align-items: start;
         }
-        @media (max-width: 800px) { .content-grid { grid-template-columns: 1fr; } }
+        @media (max-width: 960px) { .content-grid { grid-template-columns: 1fr; } }
         
         /* Cards */
         .card {
             background: white;
             border-radius: 16px;
-            padding: 25px;
+            padding: 22px;
             box-shadow: 0 4px 15px rgba(0,0,0,0.08);
         }
+        .books-card { overflow: hidden; }
         .card h2 {
             font-size: 18px;
             color: #333;
@@ -376,13 +460,16 @@ $books = $conn->query("SELECT
         .btn-primary:hover { opacity: 0.9; }
         
         /* Table Styling */
+        .table-wrap { width: 100%; overflow-x: visible; }
         .books-table {
             width: 100%;
             border-collapse: collapse;
+            table-layout: fixed;
+            min-width: 0;
         }
         .books-table th {
             background: #f8f9fa;
-            padding: 14px 15px;
+            padding: 13px 10px;
             text-align: left;
             font-size: 12px;
             text-transform: uppercase;
@@ -392,23 +479,33 @@ $books = $conn->query("SELECT
             border-bottom: 2px solid #e9ecef;
         }
         .books-table td {
-            padding: 15px;
+            padding: 12px 10px;
             border-bottom: 1px solid #f0f0f0;
             vertical-align: middle;
         }
         .books-table tr:hover { background: #fafbfc; }
+        .books-table th:nth-child(1) { width: 24%; }
+        .books-table th:nth-child(2) { width: 14%; }
+        .books-table th:nth-child(3) { width: 13%; }
+        .books-table th:nth-child(4) { width: 18%; }
+        .books-table th:nth-child(5) { width: 10%; }
+        .books-table th:nth-child(6) { width: 11%; }
+        .books-table th:nth-child(7) { width: 10%; }
         
         .book-title {
             font-weight: 600;
             color: #333;
+            line-height: 1.45;
+            overflow-wrap: anywhere;
         }
         
         .price-input {
-            width: 100px;
-            padding: 8px 12px;
+            width: 100%;
+            min-width: 0;
+            padding: 8px 10px;
             border: 2px solid #e0e0e0;
             border-radius: 8px;
-            font-size: 14px;
+            font-size: 13px;
             text-align: right;
         }
         .price-input:focus {
@@ -417,7 +514,9 @@ $books = $conn->query("SELECT
         }
         
         .status-select {
-            padding: 8px 12px;
+            width: 100%;
+            min-width: 0;
+            padding: 8px 10px;
             border: 2px solid #e0e0e0;
             border-radius: 8px;
             font-size: 13px;
@@ -428,14 +527,25 @@ $books = $conn->query("SELECT
             outline: none;
             border-color: #667eea;
         }
+        .code-input { text-align: left; }
+        .date-input { text-align: left; }
+        .scheduled-note {
+            margin-top: 6px;
+            font-size: 12px;
+            color: #6c757d;
+            font-weight: 600;
+            line-height: 1.4;
+        }
         
         .btn-update {
-            padding: 8px 16px;
+            width: 100%;
+            min-width: 0;
+            padding: 9px 10px;
             background: #28a745;
             color: white;
             border: none;
             border-radius: 8px;
-            font-size: 13px;
+            font-size: 12px;
             font-weight: 600;
             cursor: pointer;
             transition: background 0.3s;
@@ -467,6 +577,57 @@ $books = $conn->query("SELECT
             margin-bottom: 20px;
             font-size: 14px;
         }
+        .auto-assign-msg {
+            background: #d4edda;
+            color: #155724;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            border-left: 4px solid #28a745;
+        }
+        .auto-assign-msg strong {
+            display: block;
+            margin-bottom: 6px;
+        }
+        .muted-hint {
+            font-size: 13px;
+            color: #64748b;
+            margin-top: -8px;
+            margin-bottom: 18px;
+            line-height: 1.5;
+        }
+        @media (max-width: 640px) {
+            body { padding: 20px 14px; }
+            .page-header {
+                padding: 20px;
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 14px;
+            }
+            .back-btn {
+                width: 100%;
+                text-align: center;
+            }
+            .card { padding: 20px; }
+        }
+        @media (max-width: 1180px) {
+            .books-table th,
+            .books-table td {
+                padding: 11px 8px;
+            }
+            .books-table th {
+                font-size: 11px;
+            }
+            .price-input,
+            .status-select {
+                padding: 7px 8px;
+                font-size: 12px;
+            }
+            .btn-update {
+                padding: 8px 8px;
+                font-size: 11px;
+            }
+        }
     </style>
 </head>
 <body>
@@ -474,10 +635,10 @@ $books = $conn->query("SELECT
 <div class="page-container">
     <div class="page-header">
         <div>
-            <h1>📚 Manage Books</h1>
+            <h1>&#128218; Manage Books</h1>
             <p class="subtitle">Add new books and update prices</p>
         </div>
-        <a href="admin.php" class="back-btn">← Back to Dashboard</a>
+        <a href="<?= htmlspecialchars($dashboard_url) ?>" class="back-btn">&larr; Back to Dashboard</a>
     </div>
     
     <div class="content-grid">
@@ -485,12 +646,12 @@ $books = $conn->query("SELECT
         <div class="card">
             <?php if ($auto_assigned_count > 0): ?>
             <div style="background: #d4edda; color: #155724; padding: 15px; border-radius: 10px; margin-bottom: 20px; border-left: 4px solid #28a745;">
-                <strong>✅ Auto-Assignment Complete!</strong><br>
+                <strong>&#9989; Auto-Assignment Complete!</strong><br>
                 <span style="font-size: 14px;">Automatically assigned book to <strong><?php echo $auto_assigned_count; ?></strong> student(s) with existing balance.</span><br>
-                <span style="font-size: 13px; opacity: 0.8;">Total deducted: GH₵ <?php echo number_format($auto_assigned_total, 2); ?></span>
+                <span style="font-size: 13px; opacity: 0.8;">Total deducted: GH&#8373; <?php echo number_format($auto_assigned_total, 2); ?></span>
             </div>
             <?php endif; ?>
-            <h2><span class="icon">➕</span> Add New Book</h2>
+            <h2><span class="icon">&#10133;</span> Add New Book</h2>
             <form method="post">
                 <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
                 <div class="form-group">
@@ -498,7 +659,11 @@ $books = $conn->query("SELECT
                     <input type="text" name="book_title" placeholder="Enter book title" required>
                 </div>
                 <div class="form-group">
-                    <label>Price (GH₵)</label>
+                    <label>Course Code</label>
+                    <input type="text" name="course_code" placeholder="e.g. EDC 211" required>
+                </div>
+                <div class="form-group">
+                    <label>Price (GH&#8373;)</label>
                     <input type="number" step="0.01" name="price" placeholder="0.00" required>
                 </div>
                 <div class="form-group">
@@ -511,14 +676,16 @@ $books = $conn->query("SELECT
         
         <!-- Books List -->
         <div class="card">
-            <h2><span class="icon">📖</span> All Books</h2>
+            <h2><span class="icon">&#128214;</span> All Books</h2>
             
             <?php if ($books && $books->num_rows > 0): ?>
+                <div class="table-wrap">
                 <table class="books-table">
                     <thead>
                         <tr>
                             <th>Book Title</th>
-                            <th>Price (GH₵)</th>
+                            <th>Course Code</th>
+                            <th>Price (GH&#8373;)</th>
                             <th>Effective Date</th>
                             <th>Stock</th>
                             <th>Status</th>
@@ -527,28 +694,32 @@ $books = $conn->query("SELECT
                     </thead>
                     <tbody>
                         <?php while ($row = $books->fetch_assoc()): ?>
+                        <?php $form_id = 'book-update-' . intval($row['book_id']); ?>
                         <tr>
-                            <form method="post">
-                                <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
                                 <td class="book-title"><?php echo htmlspecialchars($row['book_title']); ?></td>
                                 <td>
+                                    <input type="text" name="course_code" form="<?php echo $form_id; ?>" class="price-input code-input" value="<?php echo htmlspecialchars($row['course_code'] ?? ''); ?>">
+                                </td>
+                                <td>
                                     <input type="number" step="0.01" name="price" 
+                                           form="<?php echo $form_id; ?>"
                                            class="price-input" value="<?php echo $row['price']; ?>">
                                     <?php if (!empty($row['scheduled_new_price']) && !empty($row['scheduled_effective_date'])): ?>
-                                        <div style="margin-top:6px; font-size: 12px; color: #6c757d; font-weight: 600;">
-                                            Scheduled: GH₵ <?php echo number_format(floatval($row['scheduled_new_price']), 2); ?> on <?php echo htmlspecialchars($row['scheduled_effective_date']); ?>
+                                        <div class="scheduled-note">
+                                            Scheduled: GH&#8373; <?php echo number_format(floatval($row['scheduled_new_price']), 2); ?> on <?php echo htmlspecialchars($row['scheduled_effective_date']); ?>
                                         </div>
                                     <?php endif; ?>
                                 </td>
                                 <td>
-                                    <input type="date" name="effective_date" class="price-input" style="width: 155px; text-align: left;" value="<?php echo htmlspecialchars($row['scheduled_effective_date'] ?: date('Y-m-d')); ?>">
+                                    <input type="date" name="effective_date" form="<?php echo $form_id; ?>" class="price-input date-input" value="<?php echo htmlspecialchars($row['scheduled_effective_date'] ?: date('Y-m-d')); ?>">
                                 </td>
                                 <td>
                                     <input type="number" name="stock_quantity" min="0" 
-                                           class="price-input" style="width: 90px;" value="<?php echo intval($row['stock_quantity'] ?? 0); ?>">
+                                           form="<?php echo $form_id; ?>"
+                                           class="price-input stock-input" value="<?php echo intval($row['stock_quantity'] ?? 0); ?>">
                                 </td>
                                 <td>
-                                    <select name="availability" class="status-select">
+                                    <select name="availability" form="<?php echo $form_id; ?>" class="status-select">
                                         <option value="available" <?php if ($row['availability'] === 'available') echo 'selected'; ?>>
                                             Available
                                         </option>
@@ -558,14 +729,17 @@ $books = $conn->query("SELECT
                                     </select>
                                 </td>
                                 <td>
-                                    <input type="hidden" name="book_id" value="<?php echo $row['book_id']; ?>">
-                                    <button type="submit" name="update_book" class="btn-update">Update</button>
+                                    <form id="<?php echo $form_id; ?>" method="post">
+                                        <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
+                                        <input type="hidden" name="book_id" value="<?php echo intval($row['book_id']); ?>">
+                                    </form>
+                                    <button type="submit" name="update_book" value="1" form="<?php echo $form_id; ?>" class="btn-update">Update</button>
                                 </td>
-                            </form>
                         </tr>
                         <?php endwhile; ?>
                     </tbody>
                 </table>
+                </div>
             <?php else: ?>
                 <div class="empty-state">
                     <p>No books added yet. Add your first book using the form.</p>
@@ -575,9 +749,8 @@ $books = $conn->query("SELECT
     </div>
 </div>
 
-</div>
-
 <?php include 'footer.php'; ?>
 
 </body>
 </html>
+

@@ -1,12 +1,24 @@
-<?php
-session_start();
+﻿<?php
+require_once __DIR__ . '/security_bootstrap.php';
+book_system_secure_session_start();
 require_once 'db.php';
 if (file_exists(__DIR__ . '/setup_tasks.php')) {
     require_once __DIR__ . '/setup_tasks.php';
     if (function_exists('book_system_setup_ensure_column')) {
         book_system_setup_ensure_column($conn, 'lecturers', 'teaching_level', 'VARCHAR(10) NULL AFTER full_name');
+        book_system_setup_ensure_column($conn, 'books', 'course_code', 'VARCHAR(20) NULL AFTER book_title');
+        book_system_setup_ensure_column($conn, 'books', 'course_code_key', 'VARCHAR(20) NULL AFTER course_code');
     }
 }
+$conn->query("CREATE TABLE IF NOT EXISTS lecturer_materials (
+    material_id INT AUTO_INCREMENT PRIMARY KEY,
+    lecturer_id INT NOT NULL,
+    material_title VARCHAR(100) NOT NULL,
+    course_code VARCHAR(20) NOT NULL,
+    course_code_key VARCHAR(20) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_lecturer_material_code (lecturer_id, course_code_key)
+)");
 
 if (!isset($_SESSION['lecturer_logged_in']) || intval($_SESSION['lecturer_logged_in']) !== 1) {
     header('Location: lecturer_login.php');
@@ -28,6 +40,7 @@ $lecturer_id = intval($_SESSION['lecturer_id'] ?? 0);
 $lecturer_name = $_SESSION['lecturer_full_name'] ?? $_SESSION['lecturer_username'] ?? 'Lecturer';
 $semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
 $semester_name = isset($ACTIVE_SEMESTER_NAME) ? strval($ACTIVE_SEMESTER_NAME) : 'Active Semester';
+$semester_label = isset($ACTIVE_SEMESTER_LABEL) ? strval($ACTIVE_SEMESTER_LABEL) : $semester_name;
 $csrf_token = csrf_get_token();
 
 $error_msg = '';
@@ -133,15 +146,17 @@ if ($error_msg === '') {
             b.book_id,
             b.book_title,
             COUNT(*) AS books_collected
-        FROM lecturer_books lb
-        JOIN books b ON b.book_id = lb.book_id
-        JOIN request_items ri ON ri.book_id = lb.book_id AND ri.is_collected = 1
+        FROM books b
+        JOIN request_items ri ON ri.book_id = b.book_id AND ri.is_collected = 1
         JOIN requests r ON r.request_id = ri.request_id AND r.admin_id = ? AND r.semester_id = ?
-        WHERE lb.lecturer_id = ?
+        WHERE (
+            EXISTS (SELECT 1 FROM lecturer_books lb WHERE lb.lecturer_id = ? AND lb.book_id = b.book_id)
+            OR EXISTS (SELECT 1 FROM lecturer_materials lm WHERE lm.lecturer_id = ? AND lm.course_code_key <> '' AND lm.course_code_key = COALESCE(b.course_code_key, ''))
+        )
         GROUP BY b.book_id, b.book_title
         ORDER BY books_collected DESC, b.book_title ASC");
     if ($book_stmt) {
-        $book_stmt->bind_param('iii', $rep_id, $semester_id, $lecturer_id);
+        $book_stmt->bind_param('iiii', $rep_id, $semester_id, $lecturer_id, $lecturer_id);
         $book_stmt->execute();
         $book_result = $book_stmt->get_result();
         while ($book_result && ($row = $book_result->fetch_assoc())) {
@@ -165,16 +180,18 @@ if ($error_msg === '') {
             COUNT(*) AS books_collected,
             GROUP_CONCAT(DISTINCT b.book_title ORDER BY b.book_title SEPARATOR ', ') AS books_list,
             MAX(COALESCE(ri.received_at, r.created_at)) AS last_collected_at
-        FROM lecturer_books lb
-        JOIN books b ON b.book_id = lb.book_id
-        JOIN request_items ri ON ri.book_id = lb.book_id AND ri.is_collected = 1
+        FROM books b
+        JOIN request_items ri ON ri.book_id = b.book_id AND ri.is_collected = 1
         JOIN requests r ON r.request_id = ri.request_id AND r.admin_id = ? AND r.semester_id = ?
         JOIN students s ON s.student_id = r.student_id
-        WHERE lb.lecturer_id = ?
+        WHERE (
+            EXISTS (SELECT 1 FROM lecturer_books lb WHERE lb.lecturer_id = ? AND lb.book_id = b.book_id)
+            OR EXISTS (SELECT 1 FROM lecturer_materials lm WHERE lm.lecturer_id = ? AND lm.course_code_key <> '' AND lm.course_code_key = COALESCE(b.course_code_key, ''))
+        )
         GROUP BY s.student_id, s.full_name, s.index_number
         ORDER BY last_collected_at DESC, s.full_name ASC");
     if ($student_stmt) {
-        $student_stmt->bind_param('iii', $rep_id, $semester_id, $lecturer_id);
+        $student_stmt->bind_param('iiii', $rep_id, $semester_id, $lecturer_id, $lecturer_id);
         $student_stmt->execute();
         $student_result = $student_stmt->get_result();
         while ($student_result && ($row = $student_result->fetch_assoc())) {
@@ -385,7 +402,7 @@ if ($error_msg === '') {
                     <?php endif; ?>
                 <?php endif; ?>
             </div>
-            <div class="subtitle"><?php echo htmlspecialchars($semester_name); ?></div>
+                    <div class="subtitle"><?php echo htmlspecialchars($semester_label); ?></div>
         </div>
         <div class="actions">
             <a class="btn" href="lecturer_dashboard.php">Back to Dashboard</a>
@@ -490,3 +507,4 @@ if ($error_msg === '') {
 </div>
 </body>
 </html>
+

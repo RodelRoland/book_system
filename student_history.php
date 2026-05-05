@@ -1,12 +1,66 @@
 ﻿<?php
-session_start();
+require_once __DIR__ . '/security_bootstrap.php';
+book_system_secure_session_start();
 require_once 'db.php';
+if (file_exists(__DIR__ . '/setup_tasks.php')) {
+    require_once __DIR__ . '/setup_tasks.php';
+    if (function_exists('book_system_setup_ensure_column')) {
+        book_system_setup_ensure_column($conn, 'request_items', 'is_cancelled', 'TINYINT(1) NOT NULL DEFAULT 0 AFTER is_collected');
+        book_system_setup_ensure_column($conn, 'request_items', 'cancelled_at', 'DATETIME NULL AFTER is_cancelled');
+        book_system_setup_ensure_column($conn, 'request_items', 'cancel_reason', 'VARCHAR(255) NULL AFTER cancelled_at');
+        book_system_setup_ensure_column($conn, 'request_items', 'cash_refunded_amount', 'DECIMAL(10,2) NOT NULL DEFAULT 0.00 AFTER cancel_reason');
+        book_system_setup_ensure_column($conn, 'request_items', 'credit_refunded_amount', 'DECIMAL(10,2) NOT NULL DEFAULT 0.00 AFTER cash_refunded_amount');
+    }
+}
 
 if (!isset($_SESSION['admin_logged_in'])) { header('Location: admin.php'); exit; }
 
-$current_admin_id = intval($_SESSION['admin_id'] ?? 0);
-$current_admin_role = $_SESSION['admin_role'] ?? 'rep';
-$is_super_admin = ($current_admin_role === 'super_admin');
+$access_context = function_exists('book_system_get_effective_rep_access_context')
+    ? book_system_get_effective_rep_access_context($conn)
+    : null;
+$session_role = strval($_SESSION['admin_role'] ?? 'rep');
+if (!$access_context) {
+    header('Location: ' . ($session_role === 'super_admin' ? 'manage_reps.php?msg=rep_private' : 'login.php'));
+    exit;
+}
+$current_admin_id = intval($access_context['effective_admin_id'] ?? 0);
+$current_admin_role = 'rep';
+$is_super_admin = false;
+$csrf_token = csrf_get_token();
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['cancel_item'])) {
+    if (!csrf_validate($_POST['csrf_token'] ?? null)) {
+        header('Location: student_history.php?msg=csrf_invalid');
+        exit;
+    }
+
+    $cancel_item_id = intval($_POST['item_id'] ?? 0);
+    $cancel_reason = trim(strval($_POST['cancel_reason'] ?? ''));
+    $cancel_result = function_exists('book_system_cancel_request_item')
+        ? book_system_cancel_request_item($conn, $cancel_item_id, $current_admin_id, $is_super_admin, $cancel_reason)
+        : ['success' => false, 'message' => 'Refund helper is unavailable.'];
+
+    $redirect_params = [];
+    $redirect_student_id = intval($_POST['student_id'] ?? 0);
+    $redirect_index = trim(strval($_POST['index'] ?? ''));
+    $redirect_semester = intval($_POST['semester_id'] ?? 0);
+    if ($redirect_student_id > 0) {
+        $redirect_params['student_id'] = $redirect_student_id;
+    }
+    if ($redirect_index !== '') {
+        $redirect_params['index'] = $redirect_index;
+    }
+    if ($redirect_semester > 0) {
+        $redirect_params['semester_id'] = $redirect_semester;
+    }
+    $redirect_params['msg'] = $cancel_result['success'] ? 'cancelled' : 'cancel_failed';
+    if (!$cancel_result['success'] && !empty($cancel_result['message'])) {
+        $redirect_params['detail'] = substr($cancel_result['message'], 0, 120);
+    }
+
+    header('Location: student_history.php?' . http_build_query($redirect_params));
+    exit;
+}
 
 $semester_id = isset($_GET['semester_id']) ? intval($_GET['semester_id']) : 0;
 
@@ -58,9 +112,17 @@ if ($semester_id > 0) {
     $params[] = $semester_id;
 }
 
-$sql = "SELECT r.request_id, r.created_at, r.total_amount, r.amount_paid, r.credit_used, r.payment_status,
+$sql = "SELECT r.request_id, r.student_id, r.created_at, r.total_amount, r.amount_paid, r.credit_used, r.payment_status,
                COALESCE(br.refunded_amount, 0) AS refunded_amount,
-               GROUP_CONCAT(CONCAT(b.book_title, ':', COALESCE(ri.is_collected, 0)) SEPARATOR '|') as books_data
+               COALESCE(SUM(COALESCE(ri.credit_refunded_amount, 0)), 0) AS credit_refunded_amount,
+               GROUP_CONCAT(CONCAT_WS('~',
+                    ri.item_id,
+                    REPLACE(COALESCE(b.book_title, ''), '~', '-'),
+                    COALESCE(ri.is_collected, 0),
+                    COALESCE(ri.is_cancelled, 0),
+                    COALESCE(ri.cash_refunded_amount, 0),
+                    COALESCE(ri.credit_refunded_amount, 0)
+               ) SEPARATOR '|') as books_data
         FROM requests r
         LEFT JOIN students s ON r.student_id = s.student_id
         LEFT JOIN request_items ri ON r.request_id = ri.request_id
@@ -70,6 +132,11 @@ $sql = "SELECT r.request_id, r.created_at, r.total_amount, r.amount_paid, r.cred
             FROM balance_returns
             GROUP BY request_id
         ) br ON br.request_id = r.request_id
+        LEFT JOIN (
+            SELECT request_id, SUM(amount) AS carried_forward_amount
+            FROM semester_balance_carry_forwards
+            GROUP BY request_id
+        ) cf ON cf.request_id = r.request_id
         $where
         GROUP BY r.request_id
         ORDER BY r.created_at DESC";
@@ -85,6 +152,7 @@ $grand_total_paid = 0;
 $grand_total_outstanding = 0;
 $grand_total_returned = 0;
 $grand_total_available_credit = 0;
+$grand_total_credit_refunded = 0;
 $history_rows = [];
 
 if ($result) {
@@ -93,10 +161,12 @@ if ($result) {
         $amount_paid = floatval($row['amount_paid']);
         $credit_used = floatval($row['credit_used'] ?? 0);
         $refunded_amount = floatval($row['refunded_amount'] ?? 0);
+        $carried_forward_amount = floatval($row['carried_forward_amount'] ?? 0);
+        $credit_refunded_amount = floatval($row['credit_refunded_amount'] ?? 0);
         $due_after_credit = max(0, $total_amount - $credit_used);
         $cash_overpaid = max(0, $amount_paid - $due_after_credit);
         $outstanding = max(0, $due_after_credit - $amount_paid);
-        $available_credit = max(0, $cash_overpaid - $refunded_amount);
+        $available_credit = max(0, $cash_overpaid - $refunded_amount - $carried_forward_amount);
 
         $row['calc_due_after_credit'] = $due_after_credit;
         $row['calc_outstanding'] = $outstanding;
@@ -106,8 +176,9 @@ if ($result) {
         $grand_total_cost += $total_amount;
         $grand_total_paid += ($amount_paid + $credit_used);
         $grand_total_outstanding += $outstanding;
-        $grand_total_returned += $refunded_amount;
+        $grand_total_returned += ($refunded_amount + $carried_forward_amount);
         $grand_total_available_credit += $available_credit;
+        $grand_total_credit_refunded += $credit_refunded_amount;
     }
 }
 ?>
@@ -123,122 +194,228 @@ if ($result) {
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { 
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
-            background: linear-gradient(135deg, #f5f7fa 0%, #e4e8ec 100%);
+            background:
+                radial-gradient(circle at top left, rgba(99, 102, 241, 0.08), transparent 28%),
+                linear-gradient(180deg, #f8fafc 0%, #eef2f7 100%);
             min-height: 100vh;
-            padding: 30px 20px;
+            color: #0f172a;
+            padding: 26px 16px 34px;
         }
         
-        .page-container { max-width: 1100px; margin: 0 auto; }
+        .page-container { max-width: 1180px; margin: 0 auto; }
         
         .page-header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 25px 30px;
-            border-radius: 16px;
-            margin-bottom: 25px;
+            background: rgba(255,255,255,0.96);
+            border: 1px solid rgba(148, 163, 184, 0.18);
+            padding: 26px 30px;
+            border-radius: 24px;
+            margin-bottom: 22px;
             display: flex;
             justify-content: space-between;
             align-items: center;
-            box-shadow: 0 10px 30px rgba(102, 126, 234, 0.3);
+            gap: 18px;
+            box-shadow: 0 18px 45px rgba(15, 23, 42, 0.08);
         }
-        .page-header h1 { font-size: 22px; font-weight: 600; }
-        .page-header .subtitle { opacity: 0.9; margin-top: 3px; font-size: 13px; }
+        .page-header h1 {
+            font-size: 28px;
+            font-weight: 800;
+            letter-spacing: -0.02em;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: #0f172a;
+        }
+        .page-header h1 i {
+            width: 40px;
+            height: 40px;
+            border-radius: 14px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(135deg, #e0e7ff 0%, #ede9fe 100%);
+            color: #4f46e5;
+            font-size: 18px;
+        }
+        .page-header .subtitle {
+            color: #64748b;
+            margin-top: 8px;
+            font-size: 14px;
+            font-weight: 500;
+        }
+        .page-header .meta-line {
+            margin-top: 8px;
+            color: #94a3b8;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
         .back-btn {
-            background: rgba(255,255,255,0.2);
-            color: white;
-            padding: 10px 20px;
-            border-radius: 8px;
+            background: #ffffff;
+            color: #334155;
+            padding: 11px 18px;
+            border-radius: 12px;
             text-decoration: none;
             font-weight: 600;
-            transition: all 0.3s;
-            border: 1px solid rgba(255,255,255,0.3);
+            transition: all 0.2s ease;
+            border: 1px solid #dbe3ef;
+            box-shadow: 0 6px 18px rgba(148, 163, 184, 0.14);
         }
-        .back-btn:hover { background: rgba(255,255,255,0.3); }
+        .back-btn:hover { background: #f8fafc; }
         
         .card {
             background: white;
-            border-radius: 16px;
-            padding: 25px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+            border-radius: 24px;
+            padding: 24px 24px 14px;
+            border: 1px solid rgba(148, 163, 184, 0.16);
+            box-shadow: 0 18px 40px rgba(15, 23, 42, 0.06);
         }
         .summary-grid {
             display: grid;
             grid-template-columns: repeat(4, 1fr);
-            gap: 16px;
-            margin-bottom: 20px;
+            gap: 18px;
+            margin-bottom: 22px;
         }
         .summary-card {
             background: white;
-            border-radius: 16px;
-            padding: 20px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+            border-radius: 22px;
+            padding: 22px 22px 20px;
+            border: 1px solid rgba(148, 163, 184, 0.15);
+            box-shadow: 0 14px 28px rgba(15, 23, 42, 0.05);
+            position: relative;
+            overflow: hidden;
+        }
+        .summary-card::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 4px;
+            background: linear-gradient(90deg, #4f46e5 0%, #7c3aed 100%);
+        }
+        .summary-card:nth-child(2)::before {
+            background: linear-gradient(90deg, #0891b2 0%, #2563eb 100%);
+        }
+        .summary-card:nth-child(3)::before {
+            background: linear-gradient(90deg, #f59e0b 0%, #f97316 100%);
+        }
+        .summary-card:nth-child(4)::before {
+            background: linear-gradient(90deg, #10b981 0%, #14b8a6 100%);
         }
         .summary-card .label {
             font-size: 12px;
             text-transform: uppercase;
             color: #64748b;
-            margin-bottom: 8px;
+            margin-bottom: 10px;
             font-weight: 700;
+            letter-spacing: 0.08em;
         }
         .summary-card .value {
-            font-size: 22px;
+            font-size: 28px;
             font-weight: 800;
-            color: #1f2937;
+            color: #0f172a;
+            letter-spacing: -0.02em;
+        }
+
+        .section-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 16px;
+            padding-bottom: 16px;
+            margin-bottom: 14px;
+            border-bottom: 1px solid #e5e7eb;
+        }
+        .section-head h2 {
+            font-size: 17px;
+            font-weight: 800;
+            color: #0f172a;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .section-head h2 i {
+            width: 34px;
+            height: 34px;
+            border-radius: 12px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background: #eef2ff;
+            color: #4338ca;
+        }
+        .section-note {
+            font-size: 12px;
+            font-weight: 600;
+            color: #64748b;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
         }
         
         .table-container { overflow-x: auto; }
-        table { width: 100%; border-collapse: collapse; min-width: 700px; }
+        table { width: 100%; border-collapse: separate; border-spacing: 0; min-width: 760px; }
         th {
-            background: #f8f9fa;
-            padding: 14px 12px;
+            background: #f8fafc;
+            padding: 15px 14px;
             text-align: left;
             font-size: 11px;
             text-transform: uppercase;
-            letter-spacing: 0.5px;
-            color: #666;
+            letter-spacing: 0.08em;
+            color: #64748b;
             font-weight: 700;
-            border-bottom: 2px solid #e9ecef;
+            border-bottom: 1px solid #e2e8f0;
         }
         td {
-            padding: 14px 12px;
-            border-bottom: 1px solid #f0f0f0;
-            vertical-align: middle;
+            padding: 16px 14px;
+            border-bottom: 1px solid #eef2f7;
+            vertical-align: top;
             font-size: 14px;
         }
-        tr:hover { background: #fafbfc; }
+        tbody tr:hover { background: #fbfdff; }
         
         .book-pill {
-            display: inline-block;
-            padding: 4px 10px;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 7px 12px;
             margin: 2px;
-            border-radius: 15px;
+            border-radius: 999px;
             font-size: 11px;
             font-weight: 600;
+            border: 1px solid transparent;
         }
-        .collected { background: #d4edda; color: #155724; }
-        .pending { background: #fff3cd; color: #856404; }
+        .collected { background: #dcfce7; color: #166534; border-color: #86efac; }
+        .pending { background: #fef3c7; color: #92400e; border-color: #fcd34d; }
+        .cancelled { background: #e5e7eb; color: #4b5563; border-color: #d1d5db; }
         
         .status-badge {
-            display: inline-block;
-            padding: 5px 12px;
-            border-radius: 15px;
+            display: inline-flex;
+            align-items: center;
+            padding: 6px 12px;
+            border-radius: 999px;
             font-size: 11px;
             font-weight: 700;
             text-transform: uppercase;
+            letter-spacing: 0.05em;
         }
-        .status-paid { background: #d4edda; color: #155724; }
-        .status-unpaid { background: #f8d7da; color: #721c24; }
+        .status-paid { background: #dcfce7; color: #166534; }
+        .status-unpaid { background: #fee2e2; color: #991b1b; }
         
-        .credit-text { color: #28a745; font-weight: 700; }
+        .credit-text { color: #0f766e; font-weight: 700; line-height: 1.5; }
         
         .total-row {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
+            background: #f8fafc;
+            color: #0f172a;
         }
-        .total-row td { font-weight: 700; border: none; }
-        .total-row .credit-text { color: #90EE90; }
+        .total-row td {
+            font-weight: 800;
+            border-bottom: none;
+            border-top: 2px solid #cbd5e1;
+        }
+        .total-row .credit-text { color: #0f766e; }
         
-        .empty-state { text-align: center; padding: 50px; color: #888; }
+        .empty-state { text-align: center; padding: 38px 16px; color: #64748b; }
         .header-actions {
             display: flex;
             gap: 10px;
@@ -246,24 +423,121 @@ if ($result) {
             flex-wrap: wrap;
         }
         .print-btn {
-            background: rgba(255,255,255,0.2);
+            background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
             color: white;
-            border: 1px solid rgba(255,255,255,0.3);
-            padding: 10px 20px;
-            border-radius: 8px;
+            border: none;
+            padding: 11px 18px;
+            border-radius: 12px;
             font-weight: 600;
             cursor: pointer;
+            box-shadow: 0 10px 24px rgba(99, 102, 241, 0.25);
         }
+        .alert {
+            padding: 13px 16px;
+            border-radius: 12px;
+            margin-bottom: 18px;
+            font-size: 14px;
+        }
+        .alert-success { background: #dcfce7; color: #166534; border: 1px solid #86efac; }
+        .alert-error { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
+        .books-wrap {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .cancel-form {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            flex-wrap: wrap;
+            margin-bottom: 6px;
+        }
+        .cancel-btn {
+            border: 1px solid #d1d5db;
+            background: #fff;
+            color: #b91c1c;
+            padding: 5px 10px;
+            border-radius: 999px;
+            font-size: 11px;
+            font-weight: 700;
+            cursor: pointer;
+        }
+        .cancel-btn:hover { background: #fee2e2; }
+        .cancel-reason {
+            border: 1px solid #d1d5db;
+            border-radius: 999px;
+            padding: 5px 10px;
+            font-size: 11px;
+            min-width: 180px;
+        }
+        .money {
+            font-weight: 700;
+            color: #0f172a;
+            white-space: nowrap;
+        }
+        .muted { color: #64748b; }
         @media (max-width: 900px) {
-            .summary-grid { grid-template-columns: repeat(2, 1fr); }
+            .page-header { flex-direction: column; align-items: flex-start; }
+            .section-head { flex-direction: column; align-items: flex-start; }
         }
         @media (max-width: 540px) {
             .summary-grid { grid-template-columns: 1fr; }
+            body { padding: 18px 12px 24px; }
+            .page-header,
+            .card,
+            .summary-card { border-radius: 18px; }
+            .page-header { padding: 22px 18px; }
+            .card { padding: 18px 16px 10px; }
+            .page-header h1 { font-size: 22px; }
+            .summary-grid { grid-template-columns: 1fr; }
         }
         @media print {
-            body { background: white; padding: 0; }
-            .page-header, .summary-card, .card { box-shadow: none; }
-            .back-btn, .print-btn { display: none; }
+            body {
+                background: white;
+                padding: 0;
+                color: #000;
+            }
+            .page-container {
+                max-width: 100%;
+                margin: 0;
+            }
+            .page-header, .summary-card, .card {
+                box-shadow: none;
+                border: 1px solid #d1d5db;
+                background: #fff;
+            }
+            .page-header {
+                padding: 18px 20px;
+                margin-bottom: 14px;
+            }
+            .summary-grid {
+                gap: 10px;
+                margin-bottom: 14px;
+            }
+            .summary-card {
+                padding: 14px 16px;
+            }
+            .summary-card .value {
+                font-size: 20px;
+            }
+            .back-btn, .print-btn, .cancel-form, footer {
+                display: none !important;
+            }
+            .card {
+                padding: 14px 16px 8px;
+            }
+            .section-head {
+                margin-bottom: 10px;
+                padding-bottom: 10px;
+            }
+            table {
+                min-width: 0;
+            }
+            th, td {
+                padding: 10px 8px;
+                font-size: 12px;
+            }
+            .book-pill, .status-badge { box-shadow: none; }
         }
     </style>
 </head>
@@ -274,6 +548,7 @@ if ($result) {
         <div>
             <h1><i class="bi bi-clock-history"></i> Student History</h1>
             <p class="subtitle">Index: <?php echo htmlspecialchars($index); ?></p>
+            <p class="meta-line">Printable request and collection summary</p>
         </div>
         <div class="header-actions">
             <button type="button" class="print-btn" onclick="window.print()">Print Summary</button>
@@ -281,26 +556,18 @@ if ($result) {
         </div>
     </div>
 
-    <div class="summary-grid">
-        <div class="summary-card">
-            <div class="label">Requests</div>
-            <div class="value"><?php echo count($history_rows); ?></div>
-        </div>
-        <div class="summary-card">
-            <div class="label">Total Cost</div>
-            <div class="value">GH&#8373; <?php echo number_format($grand_total_cost, 2); ?></div>
-        </div>
-        <div class="summary-card">
-            <div class="label">Outstanding</div>
-            <div class="value">GH&#8373; <?php echo number_format($grand_total_outstanding, 2); ?></div>
-        </div>
-        <div class="summary-card">
-            <div class="label">Returned / Credit Left</div>
-            <div class="value">GH&#8373; <?php echo number_format($grand_total_returned + $grand_total_available_credit, 2); ?></div>
-        </div>
-    </div>
-    
     <div class="card">
+        <?php if (isset($_GET['msg']) && $_GET['msg'] === 'cancelled'): ?>
+            <div class="alert alert-success">Book cancelled and refund recorded successfully.</div>
+        <?php elseif (isset($_GET['msg']) && $_GET['msg'] === 'cancel_failed'): ?>
+            <div class="alert alert-error"><?php echo htmlspecialchars($_GET['detail'] ?? 'Could not cancel this book item.'); ?></div>
+        <?php elseif (isset($_GET['msg']) && $_GET['msg'] === 'csrf_invalid'): ?>
+            <div class="alert alert-error">Invalid request. Please refresh and try again.</div>
+        <?php endif; ?>
+        <div class="section-head">
+            <h2><i class="bi bi-journal-text"></i> Request Timeline</h2>
+            <div class="section-note"><?php echo count($history_rows); ?> record<?php echo count($history_rows) === 1 ? '' : 's'; ?> found</div>
+        </div>
         <div class="table-container">
             <table>
                 <thead>
@@ -311,6 +578,7 @@ if ($result) {
                         <th>Paid</th>
                         <th>Status</th>
                         <th>Credit</th>
+                        <th>Action</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -321,32 +589,53 @@ if ($result) {
                             $amount_paid = floatval($row['amount_paid']);
                             $credit_used = floatval($row['credit_used'] ?? 0);
                             $refunded_amount = floatval($row['refunded_amount'] ?? 0);
+                            $carried_forward_amount = floatval($row['carried_forward_amount'] ?? 0);
+                            $credit_refunded_amount = floatval($row['credit_refunded_amount'] ?? 0);
                             $outstanding = floatval($row['calc_outstanding'] ?? 0);
                             $available_credit = floatval($row['calc_available_credit'] ?? 0);
                         ?>
                         <tr>
                             <td><?php echo date('M d, Y', strtotime($row['created_at'])); ?></td>
                             <td>
+                                <div class="books-wrap">
                                 <?php 
                                 if (!empty($row['books_data'])) {
                                     $books = explode('|', $row['books_data']);
                                     foreach ($books as $book) {
                                         if ($book === '') continue;
-                                        $parts = explode(':', $book);
-                                        if (count($parts) < 2) continue;
-                                        $title = $parts[0];
-                                        $is_collected = $parts[1];
-                                        $class = ($is_collected == 1) ? 'collected' : 'pending';
-                                        $icon = ($is_collected == 1) ? '<i class="bi bi-check-lg"></i>' : '<i class="bi bi-circle"></i>';
+                                        $parts = explode('~', $book);
+                                        if (count($parts) < 6) continue;
+                                        $title = $parts[1];
+                                        $is_collected = intval($parts[2] ?? 0);
+                                        $is_cancelled = intval($parts[3] ?? 0);
+                                        $cash_refunded = floatval($parts[4] ?? 0);
+                                        $credit_refunded = floatval($parts[5] ?? 0);
+
+                                        if ($is_cancelled === 1) {
+                                            $refund_bits = [];
+                                            if ($cash_refunded > 0) {
+                                                $refund_bits[] = 'Refunded GH&#8373; ' . number_format($cash_refunded, 2);
+                                            }
+                                            if ($credit_refunded > 0) {
+                                                $refund_bits[] = 'Credit GH&#8373; ' . number_format($credit_refunded, 2);
+                                            }
+                                            $refund_text = !empty($refund_bits) ? ' - ' . implode(' | ', $refund_bits) : ' - Refunded';
+                                            echo "<span class='book-pill cancelled'><i class='bi bi-x-circle'></i> " . htmlspecialchars($title) . $refund_text . "</span> ";
+                                            continue;
+                                        }
+
+                                        $class = ($is_collected === 1) ? 'collected' : 'pending';
+                                        $icon = ($is_collected === 1) ? '<i class=\"bi bi-check-lg\"></i>' : '<i class=\"bi bi-circle\"></i>';
                                         echo "<span class='book-pill $class'>$icon " . htmlspecialchars($title) . "</span> ";
                                     }
                                 } else {
                                     echo "<span style='color:#888;'>&mdash;</span>";
                                 }
                                 ?>
+                                </div>
                             </td>
-                            <td>GH&#8373; <?php echo number_format($row['total_amount'], 2); ?></td>
-                            <td>GH&#8373; <?php echo number_format($amount_paid + $credit_used, 2); ?></td>
+                            <td class="money">GH&#8373; <?php echo number_format($row['total_amount'], 2); ?></td>
+                            <td class="money">GH&#8373; <?php echo number_format($amount_paid + $credit_used, 2); ?></td>
 
                             <td>
                                 <span class="status-badge <?php echo ($row['payment_status'] == 'paid') ? 'status-paid' : 'status-unpaid'; ?>">
@@ -356,27 +645,68 @@ if ($result) {
                             <td class="credit-text">
                                 <?php if ($outstanding > 0): ?>
                                     Owes GH&#8373; <?php echo number_format($outstanding, 2); ?>
-                                <?php elseif ($refunded_amount > 0): ?>
-                                    Returned GH&#8373; <?php echo number_format($refunded_amount, 2); ?>
+                                <?php elseif ($refunded_amount > 0 || $carried_forward_amount > 0 || $credit_refunded_amount > 0): ?>
+                                    <?php if ($refunded_amount > 0): ?>
+                                        Returned GH&#8373; <?php echo number_format($refunded_amount, 2); ?>
+                                    <?php endif; ?>
+                                    <?php if (($refunded_amount > 0) && ($carried_forward_amount > 0 || $credit_refunded_amount > 0)): ?><br><?php endif; ?>
+                                    <?php if ($carried_forward_amount > 0): ?>
+                                        Carried Forward GH&#8373; <?php echo number_format($carried_forward_amount, 2); ?>
+                                    <?php endif; ?>
+                                    <?php if (($refunded_amount > 0 || $carried_forward_amount > 0) && $credit_refunded_amount > 0): ?><br><?php endif; ?>
+                                    <?php if ($credit_refunded_amount > 0): ?>
+                                        Credit Returned GH&#8373; <?php echo number_format($credit_refunded_amount, 2); ?>
+                                    <?php endif; ?>
                                 <?php elseif ($available_credit > 0): ?>
                                     Credit GH&#8373; <?php echo number_format($available_credit, 2); ?>
                                 <?php else: ?>
-                                    0.00
+                                    <span class="muted">0.00</span>
                                 <?php endif; ?>
+                            </td>
+                            <td>
+                                <?php
+                                if (!empty($row['books_data'])) {
+                                    $books = explode('|', $row['books_data']);
+                                    foreach ($books as $book) {
+                                        if ($book === '') continue;
+                                        $parts = explode('~', $book);
+                                        if (count($parts) < 6) continue;
+                                        $item_id = intval($parts[0] ?? 0);
+                                        $title = $parts[1];
+                                        $is_collected = intval($parts[2] ?? 0);
+                                        $is_cancelled = intval($parts[3] ?? 0);
+                                        if ($item_id <= 0 || $is_collected === 1 || $is_cancelled === 1) {
+                                            continue;
+                                        }
+                                        ?>
+                                        <form method="POST" class="cancel-form" onsubmit="return confirm('Cancel <?php echo htmlspecialchars(addslashes($title), ENT_QUOTES); ?> and record the refund?');">
+                                            <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
+                                            <input type="hidden" name="cancel_item" value="1">
+                                            <input type="hidden" name="item_id" value="<?php echo $item_id; ?>">
+                                            <input type="hidden" name="student_id" value="<?php echo intval($row['student_id']); ?>">
+                                            <input type="hidden" name="index" value="<?php echo htmlspecialchars($index); ?>">
+                                            <input type="hidden" name="semester_id" value="<?php echo intval($semester_id); ?>">
+                                            <input type="text" name="cancel_reason" class="cancel-reason" placeholder="Reason for cancelling <?php echo htmlspecialchars($title); ?>">
+                                            <button type="submit" class="cancel-btn">Cancel & Refund</button>
+                                        </form>
+                                        <?php
+                                    }
+                                }
+                                ?>
                             </td>
 
                         </tr>
                         <?php endforeach; ?>
                         
                         <tr class="total-row">
-                            <td colspan="2" style="text-align: right;">Cumulative Totals:</td>
+                            <td colspan="3" style="text-align: right;">Cumulative Totals:</td>
                             <td>GH&#8373; <?php echo number_format($grand_total_cost, 2); ?></td>
                             <td>GH&#8373; <?php echo number_format($grand_total_paid, 2); ?></td>
 
                             <td></td>
                             <td class="credit-text">
                                 GH&#8373; <?php 
-                                    $total_credit = $grand_total_returned + $grand_total_available_credit;
+                                    $total_credit = $grand_total_returned + $grand_total_available_credit + $grand_total_credit_refunded;
                                     echo number_format(($total_credit > 0 ? $total_credit : 0), 2);
                                 ?>
 
@@ -384,7 +714,7 @@ if ($result) {
                         </tr>
                     <?php else: ?>
                         <tr>
-                            <td colspan="6">
+                            <td colspan="7">
                                 <div class="empty-state">No history found for this student.</div>
                             </td>
                         </tr>
@@ -399,5 +729,6 @@ if ($result) {
 
 </body>
 </html>
+
 
 

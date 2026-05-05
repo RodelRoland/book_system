@@ -1,5 +1,6 @@
 <?php
-session_start();
+require_once __DIR__ . '/security_bootstrap.php';
+book_system_secure_session_start();
 require_once 'db.php';
 
 if (!isset($_SESSION['admin_logged_in'])) {
@@ -7,68 +8,50 @@ if (!isset($_SESSION['admin_logged_in'])) {
     exit;
 }
 
-$current_admin_id = intval($_SESSION['admin_id'] ?? 0);
-$current_admin_role = $_SESSION['admin_role'] ?? 'rep';
-
-// Only reps can generate access codes (super admin doesn't need one)
-if ($current_admin_role === 'super_admin') {
+if (strval($_SESSION['admin_role'] ?? '') === 'super_admin') {
     header('Location: admin.php');
     exit;
 }
 
+$access_context = function_exists('book_system_get_effective_rep_access_context')
+    ? book_system_get_effective_rep_access_context($conn)
+    : null;
+
+if (!$access_context || !empty($access_context['is_workspace_mode'])) {
+    header('Location: rep_dashboard.php');
+    exit;
+}
+
+$rep_id = intval($access_context['effective_admin_id'] ?? 0);
+$rep_name = strval($access_context['effective_full_name'] ?? 'Rep');
+$class_name = strval($access_context['effective_class_name'] ?? '');
 $success_msg = '';
 $error_msg = '';
-$current_code = null;
-$code_expires = null;
+$csrf_token = csrf_get_token();
 
-// Fetch current access code
-$stmt = $conn->prepare("SELECT access_code, access_code_expires FROM admins WHERE admin_id = ?");
-$stmt->bind_param("i", $current_admin_id);
+$stmt = $conn->prepare("SELECT COALESCE(allow_super_admin_access, 0) AS allow_super_admin_access FROM admins WHERE admin_id = ? LIMIT 1");
+$stmt->bind_param('i', $rep_id);
 $stmt->execute();
 $result = $stmt->get_result();
-if ($result && $row = $result->fetch_assoc()) {
-    if ($row['access_code'] && $row['access_code_expires']) {
-        $expires_time = strtotime($row['access_code_expires']);
-        if ($expires_time > time()) {
-            $current_code = $row['access_code'];
-            $code_expires = $row['access_code_expires'];
+$row = ($result && $result->num_rows === 1) ? $result->fetch_assoc() : ['allow_super_admin_access' => 0];
+$allow_super_admin_access = intval($row['allow_super_admin_access'] ?? 0);
+$stmt->close();
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_access_setting'])) {
+    if (!csrf_validate($_POST['csrf_token'] ?? null)) {
+        $error_msg = 'Invalid request. Please refresh and try again.';
+    } else {
+        $allow_super_admin_access = isset($_POST['allow_super_admin_access']) ? 1 : 0;
+        $stmt = $conn->prepare("UPDATE admins SET allow_super_admin_access = ?, access_code = NULL, access_code_expires = NULL WHERE admin_id = ?");
+        $stmt->bind_param('ii', $allow_super_admin_access, $rep_id);
+        if ($stmt->execute()) {
+            $success_msg = $allow_super_admin_access
+                ? 'Super admin workspace sharing is now enabled for your rep account.'
+                : 'Super admin workspace sharing has been turned off for your rep account.';
+        } else {
+            $error_msg = 'Unable to save your access preference right now.';
         }
-    }
-}
-
-// Handle generate new code
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['generate_code'])) {
-    $duration_hours = intval($_POST['duration'] ?? 24);
-    if ($duration_hours < 1) $duration_hours = 1;
-    if ($duration_hours > 168) $duration_hours = 168; // Max 1 week
-    
-    // Generate a random 4-digit code
-    $new_code = strval(random_int(1000, 9999));
-    $expires_at = date('Y-m-d H:i:s', time() + ($duration_hours * 3600));
-    
-    $stmt = $conn->prepare("UPDATE admins SET access_code = ?, access_code_expires = ? WHERE admin_id = ?");
-    $stmt->bind_param("ssi", $new_code, $expires_at, $current_admin_id);
-    
-    if ($stmt->execute()) {
-        $current_code = $new_code;
-        $code_expires = $expires_at;
-        $success_msg = "New access code generated successfully!";
-    } else {
-        $error_msg = "Error generating access code.";
-    }
-}
-
-// Handle revoke code
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['revoke_code'])) {
-    $stmt = $conn->prepare("UPDATE admins SET access_code = NULL, access_code_expires = NULL WHERE admin_id = ?");
-    $stmt->bind_param("i", $current_admin_id);
-    
-    if ($stmt->execute()) {
-        $current_code = null;
-        $code_expires = null;
-        $success_msg = "Access code revoked. Super admin can no longer access your data.";
-    } else {
-        $error_msg = "Error revoking access code.";
+        $stmt->close();
     }
 }
 ?>
@@ -77,16 +60,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['revoke_code'])) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Generate Access Code</title>
+    <title>Workspace Access</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { 
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             background: linear-gradient(135deg, #f5f7fa 0%, #e4e8ec 100%);
             min-height: 100vh;
             padding: 30px 20px;
         }
-        .container { max-width: 600px; margin: 0 auto; }
+        .container { max-width: 760px; margin: 0 auto; }
         .header {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
@@ -96,10 +79,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['revoke_code'])) {
             display: flex;
             justify-content: space-between;
             align-items: center;
+            gap: 16px;
             box-shadow: 0 10px 30px rgba(102, 126, 234, 0.3);
         }
         .header h1 { font-size: 24px; }
-        .header .subtitle { opacity: 0.9; font-size: 14px; margin-top: 5px; }
+        .header .subtitle { opacity: 0.92; font-size: 14px; margin-top: 5px; }
         .back-btn {
             background: rgba(255,255,255,0.2);
             color: white;
@@ -110,176 +94,142 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['revoke_code'])) {
             border: 1px solid rgba(255,255,255,0.3);
         }
         .back-btn:hover { background: rgba(255,255,255,0.3); }
-        
         .card {
             background: white;
             border-radius: 16px;
-            padding: 30px;
+            padding: 28px;
             margin-bottom: 20px;
             box-shadow: 0 4px 15px rgba(0,0,0,0.08);
         }
-        .card h2 {
-            font-size: 18px;
-            color: #333;
-            margin-bottom: 20px;
-            padding-bottom: 15px;
-            border-bottom: 2px solid #f0f0f0;
-        }
-        
         .alert {
-            padding: 15px 20px;
+            padding: 14px 18px;
             border-radius: 10px;
             margin-bottom: 20px;
             font-size: 14px;
         }
-        .alert-success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
-        .alert-error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
-        .alert-info { background: #e7f3ff; color: #0c5460; border: 1px solid #b8daff; }
-        
-        .code-display {
-            background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
-            color: white;
-            padding: 30px;
-            border-radius: 16px;
-            text-align: center;
-            margin-bottom: 20px;
-        }
-        .code-display .label { font-size: 14px; opacity: 0.9; margin-bottom: 10px; }
-        .code-display .code {
-            font-size: 42px;
+        .alert-success { background: #d4edda; color: #155724; border-left: 4px solid #28a745; }
+        .alert-error { background: #f8d7da; color: #721c24; border-left: 4px solid #dc3545; }
+        .status-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 14px;
+            border-radius: 999px;
             font-weight: 700;
-            letter-spacing: 8px;
-            font-family: 'Courier New', monospace;
-        }
-        .code-display .expires {
-            margin-top: 15px;
             font-size: 13px;
-            opacity: 0.9;
+            margin-bottom: 18px;
         }
-        
-        .no-code {
-            background: #f8f9fa;
-            padding: 40px;
-            border-radius: 16px;
-            text-align: center;
-            color: #666;
+        .status-chip.shared { background: #dcfce7; color: #166534; }
+        .status-chip.private { background: #fee2e2; color: #991b1b; }
+        .title {
+            font-size: 20px;
+            font-weight: 700;
+            color: #111827;
+            margin-bottom: 8px;
         }
-        .no-code .icon { font-size: 48px; margin-bottom: 15px; }
-        .no-code p { font-size: 14px; margin-bottom: 20px; }
-        
-        .form-group { margin-bottom: 20px; }
-        .form-group label { display: block; font-weight: 600; color: #555; margin-bottom: 8px; font-size: 14px; }
-        .form-group select, .form-group input {
-            width: 100%;
-            padding: 12px;
-            border: 2px solid #e0e0e0;
-            border-radius: 8px;
+        .description {
+            color: #4b5563;
             font-size: 14px;
+            line-height: 1.7;
+            margin-bottom: 24px;
         }
-        .form-group select:focus, .form-group input:focus { outline: none; border-color: #667eea; }
-        
+        .toggle-panel {
+            border: 1px solid #e5e7eb;
+            border-radius: 14px;
+            padding: 20px;
+            background: #f8fafc;
+            margin-bottom: 22px;
+        }
+        .toggle-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+        .toggle-label {
+            font-size: 15px;
+            font-weight: 700;
+            color: #111827;
+        }
+        .toggle-note {
+            color: #64748b;
+            font-size: 13px;
+            line-height: 1.6;
+            margin-top: 6px;
+        }
+        .checkbox-wrap {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            font-weight: 700;
+            color: #111827;
+        }
+        .checkbox-wrap input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+        }
         .btn {
-            padding: 14px 28px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 12px 22px;
             border: none;
             border-radius: 10px;
-            font-size: 15px;
-            font-weight: 600;
+            font-size: 14px;
+            font-weight: 700;
             cursor: pointer;
-            transition: all 0.3s;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
         }
-        .btn-primary { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; }
-        .btn-primary:hover { opacity: 0.9; transform: translateY(-2px); }
-        .btn-danger { background: #dc3545; color: white; }
-        .btn-danger:hover { background: #c82333; }
-        .btn-block { width: 100%; }
-        
-        .actions { display: flex; gap: 15px; margin-top: 20px; }
-        .actions form { flex: 1; }
-        .actions .btn { width: 100%; }
-        
-        .info-box {
-            background: #f8f9fa;
-            padding: 20px;
-            border-radius: 12px;
-            margin-top: 20px;
-        }
-        .info-box h3 { font-size: 14px; color: #333; margin-bottom: 10px; }
-        .info-box ul { padding-left: 20px; font-size: 13px; color: #666; }
-        .info-box li { margin-bottom: 8px; }
     </style>
 </head>
 <body>
 <div class="container">
     <div class="header">
         <div>
-            <h1>🔐 Access Code</h1>
-            <p class="subtitle">Control super admin access to your data</p>
+            <h1>Workspace Access</h1>
+            <p class="subtitle"><?php echo htmlspecialchars($rep_name); ?><?php echo $class_name !== '' ? ' • ' . htmlspecialchars($class_name) : ''; ?></p>
         </div>
-        <a href="admin.php" class="back-btn">← Back</a>
+        <a href="rep_dashboard.php" class="back-btn">&larr; Back to Dashboard</a>
     </div>
-    
+
     <?php if ($success_msg): ?>
         <div class="alert alert-success"><?php echo htmlspecialchars($success_msg); ?></div>
     <?php endif; ?>
     <?php if ($error_msg): ?>
         <div class="alert alert-error"><?php echo htmlspecialchars($error_msg); ?></div>
     <?php endif; ?>
-    
+
     <div class="card">
-        <h2>Your Access Code</h2>
-        
-        <?php if ($current_code): ?>
-            <div class="code-display">
-                <div class="label">Share this code with Super Admin</div>
-                <div class="code"><?php echo htmlspecialchars($current_code); ?></div>
-                <div class="expires">Expires: <?php echo date('M j, Y g:i A', strtotime($code_expires)); ?></div>
-            </div>
-            
-            <div class="actions">
-                <form method="POST">
-                    <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
-                    <input type="hidden" name="generate_code" value="1">
-                    <input type="hidden" name="duration" value="24">
-                    <button type="submit" class="btn btn-primary">🔄 Generate New Code</button>
-                </form>
-                <form method="POST" onsubmit="return confirm('Revoke access code? Super admin will no longer be able to view your data.');">
-                    <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
-                    <input type="hidden" name="revoke_code" value="1">
-                    <button type="submit" class="btn btn-danger">🚫 Revoke Access</button>
-                </form>
-            </div>
-        <?php else: ?>
-            <div class="no-code">
-                <div class="icon">🔒</div>
-                <p>No active access code. Super admin cannot view your detailed data.</p>
-            </div>
-            
-            <form method="POST" style="margin-top: 20px;">
-                <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
-                <div class="form-group">
-                    <label>Code Validity Duration</label>
-                    <select name="duration">
-                        <option value="1">1 hour</option>
-                        <option value="6">6 hours</option>
-                        <option value="24" selected>24 hours (1 day)</option>
-                        <option value="72">72 hours (3 days)</option>
-                        <option value="168">168 hours (1 week)</option>
-                    </select>
-                </div>
-                <button type="submit" name="generate_code" class="btn btn-primary btn-block">🔑 Generate Access Code</button>
-            </form>
-        <?php endif; ?>
-        
-        <div class="info-box">
-            <h3>How it works:</h3>
-            <ul>
-                <li>Generate a temporary access code to share with the Super Admin</li>
-                <li>Super Admin enters this code to view your detailed records</li>
-                <li>Without a valid code, Super Admin can only see summary statistics</li>
-                <li>You can revoke access at any time by clicking "Revoke Access"</li>
-                <li>Codes automatically expire after the selected duration</li>
-            </ul>
+        <div class="status-chip <?php echo $allow_super_admin_access ? 'shared' : 'private'; ?>">
+            <?php echo $allow_super_admin_access ? 'Shared with Super Admin' : 'Private to Your Rep Workspace'; ?>
         </div>
+        <div class="title">Control super admin access to your rep workspace</div>
+        <p class="description">
+            This setting decides whether the super admin can open your rep dashboard and operational pages from the rep management area.
+            Platform management still stays with the super admin, but your rep data remains private unless you share it here.
+        </p>
+
+        <form method="POST">
+            <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
+            <input type="hidden" name="save_access_setting" value="1">
+
+            <div class="toggle-panel">
+                <div class="toggle-row">
+                    <div>
+                        <div class="toggle-label">Allow super admin to open my rep workspace</div>
+                        <div class="toggle-note">Turn this on only when you want the super admin to step into your workspace and view your rep-side records.</div>
+                    </div>
+                    <label class="checkbox-wrap">
+                        <input type="checkbox" name="allow_super_admin_access" value="1" <?php echo $allow_super_admin_access ? 'checked' : ''; ?>>
+                        Enable sharing
+                    </label>
+                </div>
+            </div>
+
+            <button type="submit" class="btn">Save Access Preference</button>
+        </form>
     </div>
 </div>
 

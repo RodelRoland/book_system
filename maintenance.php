@@ -1,5 +1,6 @@
-<?php
-session_start();
+﻿<?php
+require_once __DIR__ . '/security_bootstrap.php';
+book_system_secure_session_start();
 require_once 'db.php';
 
 /* Protect admin page */
@@ -9,7 +10,7 @@ if (!isset($_SESSION['admin_logged_in'])) {
 }
 
 if (($_SESSION['admin_role'] ?? '') !== 'super_admin') {
-    header("Location: admin.php");
+    header("Location: rep_dashboard.php");
     exit;
 }
 
@@ -94,6 +95,10 @@ if (isset($_POST['clear_students'])) {
             box-shadow: 0 4px 15px rgba(0,0,0,0.08);
             margin-bottom: 20px;
         }
+        .summary-card {
+            background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+            border: 1px solid #e5e7eb;
+        }
         .card h2 {
             font-size: 16px;
             color: #333;
@@ -149,18 +154,23 @@ if (isset($_POST['clear_students'])) {
 <div class="page-container">
     <div class="page-header">
         <div>
-            <h1>⚙️ System Maintenance</h1>
+            <h1>&#9881; System Maintenance</h1>
             <p class="subtitle">Reset and cleanup options</p>
         </div>
-        <a href="admin.php" class="back-btn">← Back</a>
+        <a href="admin.php" class="back-btn">&larr; Back</a>
     </div>
     
     <?php if ($message !== ""): ?>
         <div class="success-msg"><?php echo $message; ?></div>
     <?php endif; ?>
+
+    <div class="card summary-card">
+        <h2>Maintenance Controls</h2>
+        <p>Use this page only for controlled cleanup work. The first option clears request activity only, while the danger zone performs a deeper reset that also removes student records.</p>
+    </div>
     
     <div class="card">
-        <h2>🔄 Reset Requests</h2>
+        <h2>&#128260; Reset Requests</h2>
         <p>
             This will remove <strong>all book requests</strong> and <strong>request items</strong>.
             Books, prices, availability, and students will remain intact.
@@ -174,7 +184,7 @@ if (isset($_POST['clear_students'])) {
     </div>
     
     <div class="card danger-zone">
-        <h2>⚠️ Danger Zone</h2>
+        <h2>&#9888;&#65039; Danger Zone</h2>
         <p>This will completely reset the system:</p>
         <ul>
             <li>All students</li>
@@ -195,3 +205,4 @@ if (isset($_POST['clear_students'])) {
 
 </body>
 </html>
+

@@ -1,5 +1,6 @@
-<?php
-session_start();
+﻿<?php
+require_once __DIR__ . '/security_bootstrap.php';
+book_system_secure_session_start();
 require_once 'db.php';
 
 $success_msg = '';
@@ -137,7 +138,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <h1>First-Time Code Reset</h1>
             <div style="opacity:0.9; font-size: 13px; margin-top: 4px;">Set your password using the 4-digit code from super admin</div>
         </div>
-        <a href="login.php" class="back-btn">← Back</a>
+        <a href="login.php" class="back-btn">&larr; Back</a>
     </div>
 
     <?php if ($success_msg): ?>
@@ -173,3 +174,4 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <?php include 'footer.php'; ?>
 </body>
 </html>
+

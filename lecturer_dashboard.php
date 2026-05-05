@@ -1,12 +1,24 @@
-<?php
-session_start();
+﻿<?php
+require_once __DIR__ . '/security_bootstrap.php';
+book_system_secure_session_start();
 require_once 'db.php';
 if (file_exists(__DIR__ . '/setup_tasks.php')) {
     require_once __DIR__ . '/setup_tasks.php';
     if (function_exists('book_system_setup_ensure_column')) {
         book_system_setup_ensure_column($conn, 'lecturers', 'teaching_level', 'VARCHAR(10) NULL AFTER full_name');
+        book_system_setup_ensure_column($conn, 'books', 'course_code', 'VARCHAR(20) NULL AFTER book_title');
+        book_system_setup_ensure_column($conn, 'books', 'course_code_key', 'VARCHAR(20) NULL AFTER course_code');
     }
 }
+$conn->query("CREATE TABLE IF NOT EXISTS lecturer_materials (
+    material_id INT AUTO_INCREMENT PRIMARY KEY,
+    lecturer_id INT NOT NULL,
+    material_title VARCHAR(100) NOT NULL,
+    course_code VARCHAR(20) NOT NULL,
+    course_code_key VARCHAR(20) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_lecturer_material_code (lecturer_id, course_code_key)
+)");
 
 if (!isset($_SESSION['lecturer_logged_in']) || intval($_SESSION['lecturer_logged_in']) !== 1) {
     header('Location: lecturer_login.php');
@@ -77,13 +89,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_material'])) {
     if (!csrf_validate($_POST['csrf_token'] ?? null)) {
         $error_msg = 'Invalid request. Please refresh and try again.';
     } else {
-        $book_id = intval($_POST['book_id'] ?? 0);
-        if ($book_id <= 0) {
-            $error_msg = 'Please select a book.';
+        $material_title = substr(trim(strval($_POST['material_title'] ?? '')), 0, 100);
+        $course_code = substr(trim(strval($_POST['course_code'] ?? '')), 0, 20);
+        $course_code_key = function_exists('book_system_normalize_course_code')
+            ? book_system_normalize_course_code($course_code)
+            : strtoupper(preg_replace('/[^A-Za-z0-9]/', '', $course_code));
+
+        if ($material_title === '' || $course_code_key === '') {
+            $error_msg = 'Enter both the material name and course code.';
         } else {
-            $stmt = $conn->prepare("INSERT IGNORE INTO lecturer_books (lecturer_id, book_id) VALUES (?, ?)");
+            $stmt = $conn->prepare("INSERT INTO lecturer_materials (lecturer_id, material_title, course_code, course_code_key)
+                VALUES (?, ?, ?, ?)
+                ON DUPLICATE KEY UPDATE material_title = VALUES(material_title), course_code = VALUES(course_code)");
             if ($stmt) {
-                $stmt->bind_param('ii', $lecturer_id, $book_id);
+                $stmt->bind_param('isss', $lecturer_id, $material_title, $course_code, $course_code_key);
                 $stmt->execute();
                 $success_msg = 'Course material added.';
             } else {
@@ -97,14 +116,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['remove_material'])) {
     if (!csrf_validate($_POST['csrf_token'] ?? null)) {
         $error_msg = 'Invalid request. Please refresh and try again.';
     } else {
-        $book_id = intval($_POST['book_id'] ?? 0);
-        if ($book_id <= 0) {
+        $material_id = intval($_POST['material_id'] ?? 0);
+        if ($material_id <= 0) {
             $error_msg = 'Invalid request.';
         } else {
-            $cnt = $conn->prepare("SELECT COUNT(*) AS c FROM lecturer_distributions WHERE lecturer_id = ? AND book_id = ? AND semester_id = ?");
+            $cnt = $conn->prepare("SELECT COUNT(*) AS c
+                FROM lecturer_distributions ld
+                JOIN books b ON b.book_id = ld.book_id
+                JOIN lecturer_materials lm ON lm.lecturer_id = ld.lecturer_id AND lm.course_code_key = COALESCE(b.course_code_key, '')
+                WHERE lm.material_id = ? AND ld.lecturer_id = ? AND ld.semester_id = ?");
             $has_rows = 0;
             if ($cnt) {
-                $cnt->bind_param('iii', $lecturer_id, $book_id, $semester_id);
+                $cnt->bind_param('iii', $material_id, $lecturer_id, $semester_id);
                 $cnt->execute();
                 $cres = $cnt->get_result();
                 if ($cres && $cres->num_rows === 1) {
@@ -115,9 +138,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['remove_material'])) {
             if ($has_rows > 0) {
                 $error_msg = 'You cannot remove this material because it already has distribution entries for this semester.';
             } else {
-                $del = $conn->prepare("DELETE FROM lecturer_books WHERE lecturer_id = ? AND book_id = ?");
+                $del = $conn->prepare("DELETE FROM lecturer_materials WHERE lecturer_id = ? AND material_id = ?");
                 if ($del) {
-                    $del->bind_param('ii', $lecturer_id, $book_id);
+                    $del->bind_param('ii', $lecturer_id, $material_id);
                     $del->execute();
                     $success_msg = 'Course material removed.';
                 } else {
@@ -144,9 +167,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['record_distribution']
         } else {
             // Validate book is assigned to this lecturer
             $ok = false;
-            $chk = $conn->prepare("SELECT 1 FROM lecturer_books WHERE lecturer_id = ? AND book_id = ? LIMIT 1");
+            $chk = $conn->prepare("SELECT 1
+                FROM books b
+                WHERE b.book_id = ?
+                  AND (
+                    EXISTS (SELECT 1 FROM lecturer_books lb WHERE lb.lecturer_id = ? AND lb.book_id = b.book_id)
+                    OR EXISTS (SELECT 1 FROM lecturer_materials lm WHERE lm.lecturer_id = ? AND lm.course_code_key <> '' AND lm.course_code_key = COALESCE(b.course_code_key, ''))
+                  )
+                LIMIT 1");
             if ($chk) {
-                $chk->bind_param('ii', $lecturer_id, $book_id);
+                $chk->bind_param('iii', $book_id, $lecturer_id, $lecturer_id);
                 $chk->execute();
                 $cres = $chk->get_result();
                 $ok = ($cres && $cres->num_rows === 1);
@@ -248,13 +278,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_distribution']
 // Fetch assigned books + totals
 $assigned_books_list = [];
 $assigned_book_ids = [];
-$stmt = $conn->prepare("SELECT b.book_id, b.book_title, b.price
-    FROM lecturer_books lb
-    JOIN books b ON b.book_id = lb.book_id
-    WHERE lb.lecturer_id = ?
-    ORDER BY b.book_title ASC");
+$registered_materials = [];
+$stmt = $conn->prepare("SELECT material_id, material_title, course_code, course_code_key
+    FROM lecturer_materials
+    WHERE lecturer_id = ?
+    ORDER BY material_title ASC, course_code ASC");
 if ($stmt) {
     $stmt->bind_param('i', $lecturer_id);
+    $stmt->execute();
+    $res = $stmt->get_result();
+    if ($res) {
+        while ($row = $res->fetch_assoc()) {
+            $registered_materials[] = $row;
+        }
+    }
+}
+
+$stmt = $conn->prepare("SELECT DISTINCT b.book_id, b.book_title, b.price, b.course_code
+    FROM books b
+    LEFT JOIN lecturer_books lb
+        ON lb.book_id = b.book_id
+       AND lb.lecturer_id = ?
+    LEFT JOIN lecturer_materials lm
+        ON lm.lecturer_id = ?
+       AND lm.course_code_key <> ''
+       AND lm.course_code_key = COALESCE(b.course_code_key, '')
+    WHERE lb.lecturer_id IS NOT NULL OR lm.material_id IS NOT NULL
+    ORDER BY b.book_title ASC");
+if ($stmt) {
+    $stmt->bind_param('ii', $lecturer_id, $lecturer_id);
     $stmt->execute();
     $res = $stmt->get_result();
     if ($res) {
@@ -265,20 +317,19 @@ if ($stmt) {
     }
 }
 
-$all_books_list = [];
-$res = $conn->query("SELECT book_id, book_title FROM books ORDER BY book_title ASC");
-if ($res) {
-    while ($row = $res->fetch_assoc()) {
-        $all_books_list[] = $row;
-    }
-}
-
 $selected_book_id = intval($_GET['book_id'] ?? 0);
 $selected_book_title = '';
 if ($selected_book_id > 0) {
-    $stmt = $conn->prepare("SELECT b.book_title FROM lecturer_books lb JOIN books b ON b.book_id = lb.book_id WHERE lb.lecturer_id = ? AND lb.book_id = ? LIMIT 1");
+    $stmt = $conn->prepare("SELECT b.book_title
+        FROM books b
+        WHERE b.book_id = ?
+          AND (
+            EXISTS (SELECT 1 FROM lecturer_books lb WHERE lb.lecturer_id = ? AND lb.book_id = b.book_id)
+            OR EXISTS (SELECT 1 FROM lecturer_materials lm WHERE lm.lecturer_id = ? AND lm.course_code_key <> '' AND lm.course_code_key = COALESCE(b.course_code_key, ''))
+          )
+        LIMIT 1");
     if ($stmt) {
-        $stmt->bind_param('ii', $lecturer_id, $selected_book_id);
+        $stmt->bind_param('iii', $selected_book_id, $lecturer_id, $lecturer_id);
         $stmt->execute();
         $res = $stmt->get_result();
         if ($res && $res->num_rows === 1) {
@@ -402,7 +453,7 @@ if ($selected_book_id > 0) {
             s.index_number,
             s.phone,
             COALESCE(a.full_name, 'Unknown Rep') AS rep_name,
-            COALESCE(a.class_name, '—') AS rep_class,
+            COALESCE(a.class_name, 'â€”') AS rep_class,
             COALESCE(ri.received_at, r.created_at) AS collected_at
         FROM request_items ri
         JOIN requests r ON r.request_id = ri.request_id
@@ -854,7 +905,7 @@ if ($repDistributionStmt) {
                                             <div class="muted"><?php echo htmlspecialchars(date('M d, Y H:i', strtotime(strval($rep_student['activity_date'])))); ?></div>
                                         </td>
                                         <td><?php echo htmlspecialchars($rep_student['index_number']); ?></td>
-                                        <td><?php echo htmlspecialchars($rep_student['phone'] ?: '—'); ?></td>
+                                        <td><?php echo htmlspecialchars($rep_student['phone'] ?: 'â€”'); ?></td>
                                         <td><?php echo htmlspecialchars($rep_student['book_title']); ?></td>
                                         <td>
                                             <strong><?php echo strtoupper(htmlspecialchars(strval($rep_student['payment_status']))); ?></strong>
@@ -894,7 +945,7 @@ if ($repDistributionStmt) {
                                 <?php while ($r = $rep_totals->fetch_assoc()): ?>
                                     <tr>
                                         <td><?php echo htmlspecialchars($r['full_name'] ?: 'Unknown'); ?></td>
-                                        <td><?php echo htmlspecialchars($r['class_name'] ?: '—'); ?></td>
+                                        <td><?php echo htmlspecialchars($r['class_name'] ?: 'â€”'); ?></td>
                                         <td><strong><?php echo number_format(intval($r['copies'] ?? 0)); ?></strong></td>
                                     </tr>
                                 <?php endwhile; ?>
@@ -993,7 +1044,7 @@ if ($repDistributionStmt) {
                                     <tr>
                                         <td><strong><?php echo htmlspecialchars($student_row['full_name']); ?></strong></td>
                                         <td><?php echo htmlspecialchars($student_row['index_number']); ?></td>
-                                        <td><?php echo htmlspecialchars($student_row['phone'] ?: '—'); ?></td>
+                                        <td><?php echo htmlspecialchars($student_row['phone'] ?: 'â€”'); ?></td>
                                         <td><?php echo htmlspecialchars($student_row['rep_name']); ?></td>
                                         <td><?php echo htmlspecialchars($student_row['rep_class']); ?></td>
                                         <td><?php echo htmlspecialchars(date('M d, Y H:i', strtotime(strval($student_row['collected_at'])))); ?></td>
@@ -1063,19 +1114,16 @@ if ($repDistributionStmt) {
                     <input type="hidden" name="add_material" value="1">
 
                     <div class="form-group">
-                        <label>Add Material</label>
-                        <select name="book_id" required>
-                            <option value="">-- Select book --</option>
-                            <?php foreach ($all_books_list as $ab): ?>
-                                <?php $bid = intval($ab['book_id']); ?>
-                                <?php if (!isset($assigned_book_ids[$bid])): ?>
-                                    <option value="<?php echo $bid; ?>"><?php echo htmlspecialchars($ab['book_title']); ?></option>
-                                <?php endif; ?>
-                            <?php endforeach; ?>
-                        </select>
+                        <label>Material Name</label>
+                        <input type="text" name="material_title" placeholder="e.g. Data Communication" required>
                     </div>
 
-                    <button type="submit" class="btn-primary">Add</button>
+                    <div class="form-group">
+                        <label>Course Code</label>
+                        <input type="text" name="course_code" placeholder="e.g. EDC 211" required>
+                    </div>
+
+                    <button type="submit" class="btn-primary">Register Material</button>
                 </form>
 
                 <div style="overflow:auto;">
@@ -1083,26 +1131,41 @@ if ($repDistributionStmt) {
                     <thead>
                         <tr>
                             <th>Material</th>
+                            <th>Course Code</th>
+                            <th>Matched Books</th>
                             <th>Action</th>
                         </tr>
                     </thead>
                     <tbody>
-                        <?php if (count($assigned_books_list) > 0): ?>
-                            <?php foreach ($assigned_books_list as $b): ?>
+                        <?php if (count($registered_materials) > 0): ?>
+                            <?php foreach ($registered_materials as $material): ?>
+                                <?php
+                                    $matched_count = 0;
+                                    foreach ($assigned_books_list as $matched_book) {
+                                        $matched_code_key = function_exists('book_system_normalize_course_code')
+                                            ? book_system_normalize_course_code($matched_book['course_code'] ?? '')
+                                            : strtoupper(preg_replace('/[^A-Za-z0-9]/', '', strval($matched_book['course_code'] ?? '')));
+                                        if ($matched_code_key === strval($material['course_code_key'] ?? '')) {
+                                            $matched_count++;
+                                        }
+                                    }
+                                ?>
                                 <tr>
-                                    <td><?php echo htmlspecialchars($b['book_title']); ?></td>
+                                    <td><?php echo htmlspecialchars($material['material_title']); ?></td>
+                                    <td><?php echo htmlspecialchars($material['course_code']); ?></td>
+                                    <td><?php echo number_format($matched_count); ?></td>
                                     <td>
                                         <form method="POST" style="display:inline;" onsubmit="return confirm('Remove this material?');">
                                             <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
                                             <input type="hidden" name="remove_material" value="1">
-                                            <input type="hidden" name="book_id" value="<?php echo intval($b['book_id']); ?>">
+                                            <input type="hidden" name="material_id" value="<?php echo intval($material['material_id']); ?>">
                                             <button type="submit" class="btn" style="background:#dc3545; border-color:#dc3545;">Remove</button>
                                         </form>
                                     </td>
                                 </tr>
                             <?php endforeach; ?>
                         <?php else: ?>
-                            <tr><td colspan="2" style="color:#666;">No materials selected yet.</td></tr>
+                            <tr><td colspan="4" style="color:#666;">No materials registered yet.</td></tr>
                         <?php endif; ?>
                     </tbody>
                 </table>
@@ -1168,3 +1231,4 @@ if ($repDistributionStmt) {
 
 </body>
 </html>
+
