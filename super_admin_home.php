@@ -44,6 +44,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['open_semester'])) {
             if ($stmt) {
                 $stmt->bind_param('i', $semester_id);
                 $stmt->execute();
+                if (function_exists('book_system_bump_portal_lookup_cache_version')) {
+                    book_system_bump_portal_lookup_cache_version($conn);
+                }
                 if (function_exists('book_system_audit_log')) {
                     book_system_audit_log($conn, 'set_active_semester', 'semester', $semester_id, [
                         'source' => 'super_admin_home',
@@ -73,6 +76,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['create_semester'])) {
             if ($stmt) {
                 $stmt->bind_param('ss', $semester_name, $semester_start_date);
                 $stmt->execute();
+                if (function_exists('book_system_bump_portal_lookup_cache_version')) {
+                    book_system_bump_portal_lookup_cache_version($conn);
+                }
                 $new_semester_id = intval($conn->insert_id);
                 if ($new_semester_id <= 0) {
                     $lookup = $conn->prepare("SELECT semester_id FROM semesters WHERE semester_name = ? LIMIT 1");
@@ -164,267 +170,242 @@ if ($count_result && $count_result->num_rows === 1) {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Records Home</title>
     <style>
+        @import url('https://fonts.googleapis.com/css2?family=Manrope:wght@500;600;700;800&display=swap');
+        :root {
+            --surface: rgba(255, 255, 255, 0.94);
+            --border: rgba(145, 164, 212, 0.22);
+            --text: #10213e;
+            --muted: #5f6f92;
+            --shadow: 0 22px 50px rgba(30, 47, 110, 0.12);
+            --shadow-soft: 0 12px 28px rgba(30, 47, 110, 0.08);
+            --primary: #486cf1;
+            --violet: #7457e6;
+        }
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #f5f7fa 0%, #e4e8ec 100%);
+            font-family: 'Manrope', 'Segoe UI', sans-serif;
             min-height: 100vh;
-            padding: 30px 20px;
-            color: #333;
+            background:
+                radial-gradient(circle at top left, rgba(72, 108, 241, 0.18), transparent 28%),
+                radial-gradient(circle at top right, rgba(116, 87, 230, 0.16), transparent 24%),
+                linear-gradient(180deg, #f7f9ff 0%, #eef3ff 100%);
+            color: var(--text);
+            padding: 18px 14px 42px;
         }
-        .page-container { max-width: 1000px; margin: 0 auto; }
+        .page-container { width: min(1120px, 100%); margin: 0 auto; }
+        .dashboard-header, .panel, .stat-card, .alert {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 28px;
+            box-shadow: var(--shadow);
+            backdrop-filter: blur(16px);
+        }
         .dashboard-header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 30px;
-            border-radius: 16px;
-            margin-bottom: 25px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
+            padding: 24px 20px;
+            margin-bottom: 18px;
+            display: grid;
             gap: 16px;
-            flex-wrap: wrap;
-            box-shadow: 0 10px 30px rgba(102, 126, 234, 0.3);
         }
-        .dashboard-header h1 {
-            font-size: 28px;
-            font-weight: 600;
-        }
-        .dashboard-header .subtitle {
-            opacity: 0.9;
-            margin-top: 5px;
-            font-size: 14px;
-        }
-        .header-actions {
-            display: flex;
-            gap: 10px;
-            flex-wrap: wrap;
+        .hero-label {
+            display: inline-flex;
             align-items: center;
-            justify-content: flex-end;
+            width: fit-content;
+            min-height: 34px;
+            padding: 0 14px;
+            border-radius: 999px;
+            background: rgba(72, 108, 241, 0.08);
+            border: 1px solid rgba(72, 108, 241, 0.12);
+            color: var(--primary);
+            font-size: 0.76rem;
+            font-weight: 800;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
         }
+        .dashboard-header h1 { font-size: clamp(1.9rem, 6vw, 2.7rem); letter-spacing: -0.04em; }
+        .dashboard-header .subtitle { color: var(--muted); font-size: 0.96rem; line-height: 1.6; }
+        .hero-chips {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        .hero-chip {
+            display: inline-flex;
+            align-items: center;
+            min-height: 40px;
+            padding: 0 14px;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.82);
+            border: 1px solid rgba(145, 164, 212, 0.24);
+            color: var(--text);
+            font-size: 0.86rem;
+            font-weight: 700;
+            box-shadow: var(--shadow-soft);
+        }
+        .header-actions { display: flex; gap: 10px; flex-wrap: wrap; }
         .btn {
-            border-radius: 8px;
-            padding: 10px 18px;
-            font-weight: 600;
+            min-height: 52px;
+            padding: 0 18px;
+            border-radius: 18px;
+            font: inherit;
+            font-size: 0.95rem;
+            font-weight: 800;
             cursor: pointer;
             text-decoration: none;
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            font-size: 14px;
-            transition: all 0.3s;
+            transition: transform 0.2s ease;
         }
+        .btn:hover { transform: translateY(-1px); }
         .btn-light {
-            background: rgba(255,255,255,0.18);
-            color: white;
-            border: 1px solid rgba(255,255,255,0.28);
+            background: rgba(72, 108, 241, 0.08);
+            color: var(--text);
+            border: 1px solid rgba(72, 108, 241, 0.14);
         }
-        .btn-light:hover { background: rgba(255,255,255,0.28); }
         .btn-primary {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: linear-gradient(135deg, var(--primary) 0%, var(--violet) 100%);
             color: white;
             border: none;
+            box-shadow: 0 14px 26px rgba(72, 108, 241, 0.22);
         }
         .btn-dark {
-            background: #111827;
+            background: #16243f;
             color: white;
             border: none;
         }
-        .btn-dark:hover { background: #1f2937; }
         .alert {
-            padding: 15px 18px;
-            border-radius: 12px;
-            margin-bottom: 20px;
-            font-size: 14px;
-            border-left: 4px solid;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+            padding: 14px 16px;
+            margin-bottom: 16px;
+            font-size: 0.92rem;
         }
-        .alert-success { background: #d4edda; color: #155724; border-left-color: #28a745; }
-        .alert-error { background: #ffebee; color: #c62828; border-left-color: #f44336; }
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            gap: 20px;
-            margin-bottom: 30px;
-        }
+        .alert-success { color: #166534; background: #ecfdf5; border-color: #bbf7d0; }
+        .alert-error { color: #be123c; background: #fff1f2; border-color: #fecdd3; }
+        .stats-grid, .content-grid, .record-list { display: grid; gap: 14px; }
+        .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 18px; }
         .stat-card {
-            background: white;
-            padding: 25px;
-            border-radius: 12px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+            padding: 18px 16px;
             position: relative;
             overflow: hidden;
         }
         .stat-card::before {
             content: '';
             position: absolute;
-            top: 0;
-            left: 0;
+            inset: 0 auto auto 0;
             width: 100%;
             height: 4px;
+            background: var(--primary);
         }
-        .stat-card.green::before { background: #28a745; }
-        .stat-card.blue::before { background: #17a2b8; }
-        .stat-card.yellow::before { background: #ffc107; }
-        .stat-card.purple::before { background: #6f42c1; }
+        .stat-card.green::before { background: #18a870; }
+        .stat-card.blue::before { background: #0f97ad; }
+        .stat-card.yellow::before { background: #c87d16; }
+        .stat-card.purple::before { background: var(--violet); }
         .stat-card .label {
-            font-size: 12px;
+            color: var(--muted);
+            font-size: 0.78rem;
+            font-weight: 800;
+            letter-spacing: 0.08em;
             text-transform: uppercase;
-            letter-spacing: 0.5px;
-            color: #888;
-            font-weight: 600;
             margin-bottom: 8px;
         }
-        .stat-card .value {
-            font-size: 28px;
-            font-weight: 700;
+        .stat-card .value { font-size: clamp(1.3rem, 5vw, 2rem); font-weight: 800; letter-spacing: -0.04em; }
+        .content-grid { grid-template-columns: 1fr; }
+        .panel { padding: 22px 18px; }
+        .panel-kicker {
+            color: var(--muted);
+            font-size: 0.92rem;
+            line-height: 1.6;
+            margin-bottom: 18px;
         }
-        .stat-card.green .value { color: #28a745; }
-        .stat-card.blue .value { color: #17a2b8; }
-        .stat-card.yellow .value { color: #d4a500; }
-        .stat-card.purple .value { color: #6f42c1; }
-        .content-grid {
-            display: grid;
-            grid-template-columns: 1.4fr 0.9fr;
-            gap: 24px;
-        }
-        .panel {
-            background: white;
-            border-radius: 16px;
-            padding: 30px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.08);
-        }
-        .panel h2 {
-            font-size: 18px;
-            color: #333;
-            margin-bottom: 22px;
-        }
-        .record-list {
-            display: grid;
-            gap: 14px;
-        }
+        .panel h2 { font-size: 1.12rem; margin-bottom: 18px; }
         .record-item {
             display: flex;
             justify-content: space-between;
             align-items: center;
             gap: 16px;
             padding: 18px;
-            border-radius: 14px;
-            background: #f8fafc;
-            border: 1px solid #e5e7eb;
+            border-radius: 22px;
+            background: #fff;
+            border: 1px solid var(--border);
+            box-shadow: var(--shadow-soft);
             flex-wrap: wrap;
         }
-        .record-item .name {
-            font-weight: 700;
-            color: #333;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            flex-wrap: wrap;
-        }
-        .record-item .meta {
-            color: #6b7280;
-            font-size: 13px;
-            margin-top: 4px;
-        }
+        .record-item .name { font-weight: 800; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .record-item .meta { color: var(--muted); font-size: 0.88rem; margin-top: 6px; line-height: 1.55; }
         .badge {
             display: inline-flex;
             align-items: center;
-            padding: 5px 9px;
+            padding: 6px 10px;
             border-radius: 999px;
-            font-size: 11px;
-            font-weight: 700;
-            letter-spacing: 0.4px;
+            font-size: 0.72rem;
+            font-weight: 800;
+            letter-spacing: 0.08em;
             text-transform: uppercase;
         }
-        .badge-active {
-            background: #dcfce7;
-            color: #166534;
+        .badge-active { background: #ecfdf5; color: #166534; }
+        .empty-state, .active-record {
+            padding: 16px 18px;
+            border-radius: 18px;
+            background: rgba(241, 245, 255, 0.72);
+            border: 1px dashed rgba(145, 164, 212, 0.34);
+            color: var(--muted);
         }
-        .empty-state {
-            padding: 22px 18px;
-            border-radius: 12px;
-            background: #f8fafc;
-            border: 1px dashed #cbd5e1;
-            color: #6b7280;
-            text-align: center;
-        }
-        .active-record {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            padding: 10px 14px;
-            border-radius: 10px;
-            background: #f8fafc;
-            border: 1px solid #e5e7eb;
-            color: #475569;
-            font-size: 13px;
-            font-weight: 600;
-            margin-bottom: 18px;
-        }
+        .active-record { display: inline-flex; font-weight: 700; margin-bottom: 16px; }
         .form-group { margin-bottom: 16px; }
         .form-group label {
             display: block;
             margin-bottom: 8px;
-            font-size: 13px;
-            font-weight: 700;
-            color: #4b5563;
+            font-size: 0.82rem;
+            font-weight: 800;
+            color: var(--muted);
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
         }
         .form-group input {
             width: 100%;
-            padding: 13px 14px;
-            border: 2px solid #e2e8f0;
-            border-radius: 12px;
-            font-size: 14px;
-            background: #f8fafc;
-            transition: all 0.3s;
+            min-height: 52px;
+            padding: 0 16px;
+            border: 1px solid rgba(145, 164, 212, 0.32);
+            border-radius: 18px;
+            font: inherit;
+            font-weight: 700;
+            background: #fff;
         }
         .form-group input:focus {
             outline: none;
-            border-color: #667eea;
-            background: white;
+            border-color: rgba(72, 108, 241, 0.55);
+            box-shadow: 0 0 0 4px rgba(72, 108, 241, 0.12);
         }
         .inline-form { margin: 0; }
-        .panel-footer {
-            margin-top: 18px;
-        }
-        @media (max-width: 960px) {
-            .stats-grid { grid-template-columns: repeat(2, 1fr); }
-            .content-grid { grid-template-columns: 1fr; }
-        }
-        @media (max-width: 560px) {
-            .stats-grid { grid-template-columns: 1fr; }
-            .dashboard-header,
-            .panel { padding: 24px; }
-            .dashboard-header h1 { font-size: 24px; }
-            .header-actions {
-                width: 100%;
-                justify-content: stretch;
+        .panel-footer { margin-top: 18px; }
+        @media (min-width: 760px) {
+            .dashboard-header {
+                grid-template-columns: minmax(0, 1fr) auto;
+                align-items: start;
             }
-            .header-actions .btn,
-            .header-actions .inline-form,
-            .header-actions .inline-form button {
-                width: 100%;
-            }
-            .record-item .btn {
-                width: 100%;
-            }
+            .stats-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+            .content-grid { grid-template-columns: 1.25fr 0.9fr; }
         }
     </style>
 </head>
 <body>
 <div class="page-container">
-    <div class="dashboard-header">
-        <div>
-            <h1>Welcome, <?php echo htmlspecialchars($current_admin_name); ?></h1>
-            <p class="subtitle">
-                <?php echo $active_semester_name !== '' ? htmlspecialchars($active_semester_name) : 'No active semester'; ?>
-                <?php if ($active_semester_start_date !== ''): ?>
-                    <?php echo ' • Starts ' . htmlspecialchars(date('M d, Y', strtotime($active_semester_start_date))); ?>
-                <?php endif; ?>
-            </p>
+        <div class="dashboard-header">
+            <div>
+                <div class="hero-label">Records Home</div>
+                <h1>Welcome, <?php echo htmlspecialchars($current_admin_name); ?></h1>
+                <p class="subtitle">
+                    <?php echo $active_semester_name !== '' ? htmlspecialchars($active_semester_name) : 'No active semester'; ?>
+                    <?php if ($active_semester_start_date !== ''): ?>
+                        <?php echo ' • Starts ' . htmlspecialchars(date('M d, Y', strtotime($active_semester_start_date))); ?>
+                    <?php endif; ?>
+                </p>
+                <div class="hero-chips" style="margin-top: 12px;">
+                    <span class="hero-chip">Semester control center</span>
+                    <span class="hero-chip">Archived records stay safe</span>
+                </div>
         </div>
         <div class="header-actions">
+            <a href="common_request_portal.php" class="btn btn-light">Portal</a>
             <a href="admin.php" class="btn btn-light">Open Dashboard</a>
             <form method="POST" class="inline-form">
                 <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
@@ -459,9 +440,10 @@ if ($count_result && $count_result->num_rows === 1) {
         </div>
     </div>
 
-    <div class="content-grid">
+        <div class="content-grid">
         <div class="panel">
             <h2>Continue With Existing Record</h2>
+            <p class="panel-kicker">Open any saved semester record and make it the active workspace without affecting older archived data.</p>
             <div class="record-list">
                 <?php if (!empty($semesters)): ?>
                     <?php foreach ($semesters as $semester): ?>
@@ -495,6 +477,7 @@ if ($count_result && $count_result->num_rows === 1) {
 
         <div class="panel">
             <h2>Start a New Semester Record</h2>
+            <p class="panel-kicker">Create a fresh active semester so reps can upload new class lists, add books again, and continue in a clean workspace.</p>
             <div class="active-record">Current Record: <?php echo htmlspecialchars($active_semester_name !== '' ? $active_semester_name : 'None'); ?></div>
             <form method="POST">
                 <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
@@ -513,6 +496,7 @@ if ($count_result && $count_result->num_rows === 1) {
         </div>
     </div>
 </div>
+<?php if (file_exists(__DIR__ . '/notifications_widget.php')) { require __DIR__ . '/notifications_widget.php'; } ?>
 </body>
 </html>
 

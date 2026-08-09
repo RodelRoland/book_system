@@ -103,7 +103,7 @@ $reps_sql = "
     LEFT JOIN (
         SELECT admin_id,
                COUNT(*) AS request_count,
-               SUM(CASE WHEN payment_status = 'paid' THEN amount_paid ELSE 0 END) AS cash_collected
+               SUM(COALESCE(amount_paid, 0)) AS cash_collected
         FROM requests
         WHERE semester_id = $semester_id
         GROUP BY admin_id

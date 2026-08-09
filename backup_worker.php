@@ -196,12 +196,8 @@ try {
             'Approved/Rejected By',
             'Rep Account Created',
             'Rep Is Active',
-            'Requires Password Reset',
-            'First Time Code Status',
             'Can Login',
             'Next Step',
-            'First Time Code',
-            'First Time Code Expires',
             'MoMo Number',
             'Bank Name',
             'Account Name',
@@ -219,9 +215,6 @@ try {
                     approver.username AS approved_by_username,
                     rep.admin_id AS rep_admin_id,
                     rep.is_active AS rep_is_active,
-                    rep.requires_password_reset AS rep_requires_password_reset,
-                    rep.first_time_code AS rep_first_time_code,
-                    rep.first_time_code_expires AS rep_first_time_code_expires,
                     rs.momo_number,
                     rs.bank_name,
                     rs.account_name,
@@ -236,25 +229,16 @@ try {
             while ($row = $res->fetch_assoc()) {
                 $repCreated = intval($row['rep_admin_id'] ?? 0) > 0 ? 'YES' : 'NO';
                 $repActive = ($repCreated === 'YES') ? (intval($row['rep_is_active'] ?? 0) === 1 ? 'YES' : 'NO') : '';
-                $repReset = ($repCreated === 'YES') ? (intval($row['rep_requires_password_reset'] ?? 0) === 1 ? 'YES' : 'NO') : '';
 
-                $codeStatus = '';
                 $canLogin = '';
                 $nextStep = '';
-                $expiresStr = strval($row['rep_first_time_code_expires'] ?? '');
-                $expiresTs = $expiresStr !== '' ? strtotime($expiresStr) : 0;
 
                 if ($repCreated === 'YES') {
                     if (intval($row['rep_is_active'] ?? 0) !== 1) {
                         $canLogin = 'NO';
                         $nextStep = 'ACCOUNT INACTIVE';
-                    } elseif (intval($row['rep_requires_password_reset'] ?? 0) === 1) {
-                        $canLogin = 'NO';
-                        $codeStatus = ($expiresTs > 0 && $expiresTs < time()) ? 'EXPIRED' : 'ACTIVE';
-                        $nextStep = ($codeStatus === 'EXPIRED') ? 'REGENERATE CODE' : 'SEND CODE / SET PASSWORD';
                     } else {
                         $canLogin = 'YES';
-                        $codeStatus = 'COMPLETED';
                         $nextStep = 'LOGIN';
                     }
                 } else {
@@ -268,11 +252,6 @@ try {
                     }
                 }
 
-                $code = '';
-                if ($repCreated === 'YES' && intval($row['rep_requires_password_reset'] ?? 0) === 1) {
-                    $code = strval($row['rep_first_time_code'] ?? '');
-                }
-
                 fputcsv($fp, [
                     $row['signup_id'] ?? '',
                     $row['username'] ?? '',
@@ -284,12 +263,8 @@ try {
                     $row['approved_by_username'] ?? '',
                     $repCreated,
                     $repActive,
-                    $repReset,
-                    $codeStatus,
                     $canLogin,
                     $nextStep,
-                    $code,
-                    $row['rep_first_time_code_expires'] ?? '',
                     $row['momo_number'] ?? '',
                     $row['bank_name'] ?? '',
                     $row['account_name'] ?? '',

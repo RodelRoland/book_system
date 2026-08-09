@@ -2,6 +2,9 @@
 require_once __DIR__ . '/security_bootstrap.php';
 book_system_secure_session_start();
 require_once 'db.php';
+if (function_exists('book_system_sync_connection_timezone')) {
+    book_system_sync_connection_timezone($conn);
+}
 if (file_exists(__DIR__ . '/setup_tasks.php')) {
     require_once __DIR__ . '/setup_tasks.php';
     if (function_exists('book_system_setup_ensure_column')) {
@@ -62,10 +65,46 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['cancel_item'])) {
     exit;
 }
 
+$active_semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
+$active_semester_name = isset($ACTIVE_SEMESTER_NAME) ? trim(strval($ACTIVE_SEMESTER_NAME)) : '';
+$active_semester_label = isset($ACTIVE_SEMESTER_LABEL) ? trim(strval($ACTIVE_SEMESTER_LABEL)) : $active_semester_name;
 $semester_id = isset($_GET['semester_id']) ? intval($_GET['semester_id']) : 0;
+if ($semester_id <= 0 && $active_semester_id > 0) {
+    $semester_id = $active_semester_id;
+}
+$history_semester_label = '';
+if ($semester_id > 0) {
+    if ($semester_id === $active_semester_id && $active_semester_label !== '') {
+        $history_semester_label = $active_semester_label;
+    } else {
+        $semester_label_stmt = $conn->prepare("SELECT semester_name, semester_start_date FROM semesters WHERE semester_id = ? LIMIT 1");
+        if ($semester_label_stmt) {
+            $semester_label_stmt->bind_param('i', $semester_id);
+            $semester_label_stmt->execute();
+            $semester_label_res = $semester_label_stmt->get_result();
+            if ($semester_label_res && $semester_label_res->num_rows === 1) {
+                $semester_label_row = $semester_label_res->fetch_assoc();
+                $history_semester_label = function_exists('book_system_build_semester_label')
+                    ? strval(book_system_build_semester_label(
+                        strval($semester_label_row['semester_name'] ?? ''),
+                        strval($semester_label_row['semester_start_date'] ?? '')
+                    ))
+                    : trim(strval($semester_label_row['semester_name'] ?? ''));
+            }
+            $semester_label_stmt->close();
+        }
+    }
+}
 
 $student_id = intval($_GET['student_id'] ?? 0);
 $index = trim($_GET['index'] ?? '');
+$return_url = trim(strval($_GET['return_url'] ?? 'view_request.php'));
+if ($return_url === '' || preg_match('/^\s*(?:https?:)?\/\//i', $return_url)) {
+    $return_url = 'view_request.php';
+}
+if (strpos($return_url, 'view_request.php') !== 0) {
+    $return_url = 'view_request.php';
+}
 
 if ($student_id > 0 && $index === '') {
     $stmt = $conn->prepare("SELECT index_number FROM students WHERE student_id = ? LIMIT 1");
@@ -180,6 +219,38 @@ if ($result) {
         $grand_total_available_credit += $available_credit;
         $grand_total_credit_refunded += $credit_refunded_amount;
     }
+}
+
+$student_history_refresh_state = [
+    'student_id' => $student_id,
+    'index' => $index,
+    'semester_id' => $semester_id,
+    'totals' => [
+        'cost' => round($grand_total_cost, 2),
+        'paid' => round($grand_total_paid, 2),
+        'outstanding' => round($grand_total_outstanding, 2),
+        'returned' => round($grand_total_returned, 2),
+        'available_credit' => round($grand_total_available_credit, 2),
+        'credit_refunded' => round($grand_total_credit_refunded, 2),
+    ],
+    'rows' => array_map(static function (array $row): array {
+        return [
+            'request_id' => intval($row['request_id'] ?? 0),
+            'amount_paid' => round(floatval($row['amount_paid'] ?? 0), 2),
+            'total_amount' => round(floatval($row['total_amount'] ?? 0), 2),
+            'credit_used' => round(floatval($row['credit_used'] ?? 0), 2),
+            'refunded_amount' => round(floatval($row['refunded_amount'] ?? 0), 2),
+            'credit_refunded_amount' => round(floatval($row['credit_refunded_amount'] ?? 0), 2),
+            'books_data' => strval($row['books_data'] ?? ''),
+            'created_at' => strval($row['created_at'] ?? ''),
+        ];
+    }, $history_rows),
+];
+$student_history_refresh_token = function_exists('book_system_build_refresh_token')
+    ? book_system_build_refresh_token($student_history_refresh_state)
+    : sha1(json_encode($student_history_refresh_state, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+if (function_exists('book_system_maybe_output_refresh_status')) {
+    book_system_maybe_output_refresh_status($student_history_refresh_token);
 }
 ?>
 
@@ -445,12 +516,30 @@ if ($result) {
             flex-wrap: wrap;
             gap: 8px;
         }
+        .books-wrap form {
+            margin: 0;
+        }
         .cancel-form {
             display: inline-flex;
             align-items: center;
             gap: 6px;
             flex-wrap: wrap;
             margin-bottom: 6px;
+        }
+        .book-pill-button {
+            border: none;
+            cursor: pointer;
+            transition: transform 0.15s ease, opacity 0.15s ease, box-shadow 0.15s ease;
+        }
+        .book-pill-button:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 8px 16px rgba(15, 23, 42, 0.08);
+        }
+        .book-pill-button.is-saving {
+            opacity: 0.6;
+            cursor: wait;
+            transform: none;
+            box-shadow: none;
         }
         .cancel-btn {
             border: 1px solid #d1d5db;
@@ -548,11 +637,16 @@ if ($result) {
         <div>
             <h1><i class="bi bi-clock-history"></i> Student History</h1>
             <p class="subtitle">Index: <?php echo htmlspecialchars($index); ?></p>
-            <p class="meta-line">Printable request and collection summary</p>
+            <p class="meta-line">
+                Printable request and collection summary
+                <?php if ($semester_id > 0 && $history_semester_label !== ''): ?>
+                    • <?php echo htmlspecialchars($history_semester_label); ?>
+                <?php endif; ?>
+            </p>
         </div>
         <div class="header-actions">
             <button type="button" class="print-btn" onclick="window.print()">Print Summary</button>
-            <a href="view_request.php" class="back-btn"><i class="bi bi-arrow-left"></i> Back to Requests</a>
+            <button type="button" class="back-btn" data-return-url="<?php echo htmlspecialchars($return_url, ENT_QUOTES); ?>" onclick="goBackToRequests(this)"><i class="bi bi-arrow-left"></i> Back to Requests</button>
         </div>
     </div>
 
@@ -595,7 +689,7 @@ if ($result) {
                             $available_credit = floatval($row['calc_available_credit'] ?? 0);
                         ?>
                         <tr>
-                            <td><?php echo date('M d, Y', strtotime($row['created_at'])); ?></td>
+                            <td><?php echo htmlspecialchars(function_exists('book_system_format_datetime_local') ? book_system_format_datetime_local(strval($row['created_at'] ?? ''), 'M d, Y') : date('M d, Y', strtotime($row['created_at']))); ?></td>
                             <td>
                                 <div class="books-wrap">
                                 <?php 
@@ -605,6 +699,7 @@ if ($result) {
                                         if ($book === '') continue;
                                         $parts = explode('~', $book);
                                         if (count($parts) < 6) continue;
+                                        $item_id = intval($parts[0] ?? 0);
                                         $title = $parts[1];
                                         $is_collected = intval($parts[2] ?? 0);
                                         $is_cancelled = intval($parts[3] ?? 0);
@@ -626,7 +721,26 @@ if ($result) {
 
                                         $class = ($is_collected === 1) ? 'collected' : 'pending';
                                         $icon = ($is_collected === 1) ? '<i class=\"bi bi-check-lg\"></i>' : '<i class=\"bi bi-circle\"></i>';
-                                        echo "<span class='book-pill $class'>$icon " . htmlspecialchars($title) . "</span> ";
+                                        if ($item_id > 0) {
+                                            ?>
+                                            <form method="POST" action="toggle_book_collection.php" class="history-toggle-form" data-item-id="<?php echo $item_id; ?>">
+                                                <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token, ENT_QUOTES); ?>">
+                                                <input type="hidden" name="item_id" value="<?php echo $item_id; ?>">
+                                                <input type="hidden" name="desired_state" value="<?php echo $is_collected === 1 ? '0' : '1'; ?>">
+                                                <button
+                                                    type="submit"
+                                                    class="book-pill book-pill-button <?php echo $class; ?>"
+                                                    data-item-id="<?php echo $item_id; ?>"
+                                                    data-state="<?php echo $is_collected === 1 ? '1' : '0'; ?>"
+                                                    data-title="<?php echo htmlspecialchars($title, ENT_QUOTES); ?>"
+                                                >
+                                                    <?php echo $icon; ?> <?php echo htmlspecialchars($title); ?>
+                                                </button>
+                                            </form>
+                                            <?php
+                                        } else {
+                                            echo "<span class='book-pill $class'>$icon " . htmlspecialchars($title) . "</span> ";
+                                        }
                                     }
                                 } else {
                                     echo "<span style='color:#888;'>&mdash;</span>";
@@ -726,6 +840,117 @@ if ($result) {
 </div>
 
 <?php include 'footer.php'; ?>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    function parseJsonResponse(response) {
+        if (!response.ok) {
+            throw new Error('Request failed');
+        }
+        return response.text().then(function(text) {
+            var clean = String(text || '').replace(/^\uFEFF/, '').trim();
+            return clean ? JSON.parse(clean) : {};
+        });
+    }
+
+    function applyHistoryBookState(itemId, isCollected) {
+        document.querySelectorAll('.book-pill-button[data-item-id="' + itemId + '"]').forEach(function(button) {
+            button.dataset.state = isCollected ? '1' : '0';
+            button.classList.remove('collected', 'pending');
+            button.classList.add(isCollected ? 'collected' : 'pending');
+            button.innerHTML = (isCollected ? '<i class="bi bi-check-lg"></i> ' : '<i class="bi bi-circle"></i> ') + button.dataset.title;
+        });
+        document.querySelectorAll('.history-toggle-form[data-item-id="' + itemId + '"]').forEach(function(form) {
+            var desiredInput = form.querySelector('input[name="desired_state"]');
+            if (desiredInput) {
+                desiredInput.value = isCollected ? '0' : '1';
+            }
+        });
+    }
+
+    document.querySelectorAll('.history-toggle-form').forEach(function(form) {
+        form.addEventListener('submit', function(event) {
+            event.preventDefault();
+
+            var button = form.querySelector('.book-pill-button');
+            if (!button) {
+                return;
+            }
+
+            var itemId = button.getAttribute('data-item-id') || form.getAttribute('data-item-id');
+            var previousState = button.dataset.state === '1';
+            var nextState = !previousState;
+
+            var desiredValue = nextState ? '1' : '0';
+            var data = new FormData(form);
+            data.set('desired_state', desiredValue);
+            data.append('ajax', '1');
+
+            applyHistoryBookState(itemId, nextState);
+            button.classList.add('is-saving');
+            button.disabled = true;
+
+            fetch(form.getAttribute('action'), {
+                method: 'POST',
+                body: data,
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'Accept': 'application/json'
+                },
+                credentials: 'same-origin'
+            })
+            .then(parseJsonResponse)
+            .then(function(payload) {
+                if (payload && payload.success) {
+                    applyHistoryBookState(String(payload.item_id || itemId), parseInt(payload.is_collected || 0, 10) === 1);
+                } else {
+                    applyHistoryBookState(itemId, previousState);
+                    alert((payload && (payload.error || payload.message)) ? (payload.error || payload.message) : 'Could not update book status right now.');
+                }
+            })
+            .catch(function() {
+                applyHistoryBookState(itemId, previousState);
+                alert('Could not update book status right now.');
+            })
+            .finally(function() {
+                button.classList.remove('is-saving');
+                button.disabled = false;
+            });
+        });
+    });
+});
+
+function goBackToRequests(button) {
+    var returnUrl = (button && button.getAttribute('data-return-url')) || 'view_request.php';
+    var referrer = document.referrer || '';
+    var cameFromRequests = referrer.indexOf('view_request.php') !== -1 && window.history.length > 1;
+
+    if (cameFromRequests) {
+        window.history.back();
+        window.setTimeout(function() {
+            if (document.visibilityState === 'visible') {
+                window.location.href = returnUrl;
+            }
+        }, 700);
+        return;
+    }
+
+    window.location.href = returnUrl;
+}
+</script>
+
+<?php
+if (function_exists('book_system_render_refresh_polling_script')) {
+    book_system_render_refresh_polling_script($student_history_refresh_token, [
+        'interval_ms' => 15000,
+        'min_gap_ms' => 10000,
+        'pause_selectors' => [
+            '.cancel-reason:focus',
+            '.history-toggle-form .book-pill-button.is-saving',
+        ],
+    ]);
+}
+?>
 
 </body>
 </html>

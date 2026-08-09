@@ -35,8 +35,11 @@ $rep_class = strval($_SESSION['admin_class_name'] ?? '');
 $rep_access_status = function_exists('book_system_get_rep_access_status')
     ? book_system_get_rep_access_status($conn, $admin_id)
     : [];
+$access_mode_config = function_exists('book_system_get_access_mode_config')
+    ? book_system_get_access_mode_config($conn)
+    : ['effective_mode' => 'premium_active'];
 
-if (!empty($rep_access_status['can_access'])) {
+if (!empty($rep_access_status['can_access']) || strval($access_mode_config['effective_mode'] ?? 'premium_active') !== 'premium_active') {
     header('Location: rep_dashboard.php');
     exit;
 }

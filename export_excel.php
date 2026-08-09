@@ -29,17 +29,26 @@ $is_super_admin = false;
 
 // Capture the search term from the URL
 $search = isset($_GET['search']) ? trim($_GET['search']) : '';
+$request_filter = trim(strval($_GET['filter'] ?? 'all'));
+if (!in_array($request_filter, ['all', 'paid', 'partial', 'unpaid', 'pending', 'given_out', 'today'], true)) {
+    $request_filter = 'all';
+}
+$request_day = trim(strval($_GET['request_day'] ?? ''));
+$request_day_obj = $request_day !== '' ? DateTime::createFromFormat('Y-m-d', $request_day) : false;
+if (!$request_day_obj || $request_day_obj->format('Y-m-d') !== $request_day) {
+    $request_day = '';
+}
+$selected_book_id = intval($_GET['book_id'] ?? 0);
+$book_status = trim(strval($_GET['book_status'] ?? 'all'));
+if (!in_array($book_status, ['all', 'taken', 'not_taken'], true) || $selected_book_id <= 0) {
+    $book_status = 'all';
+}
 
 $semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
 
 $collection_filter = isset($_GET['collection_filter']) ? $_GET['collection_filter'] : 'all';
 if (!in_array($collection_filter, ['all', 'not_taken'], true)) {
     $collection_filter = 'all';
-}
-
-$collection_where = '';
-if ($collection_filter === 'not_taken') {
-    $collection_where = " AND COALESCE(ri.is_cancelled, 0) = 0 AND (ri.is_collected = 0 OR ri.is_collected IS NULL) ";
 }
 
 /* Tell browser this is a CSV file */
@@ -63,9 +72,50 @@ $sql = "SELECT
         JOIN students s ON r.student_id = s.student_id
         JOIN request_items ri ON r.request_id = ri.request_id
         JOIN books b ON ri.book_id = b.book_id
-        WHERE r.semester_id = ?
-          " . ($is_super_admin ? "" : " AND r.admin_id = ? ") . "
-          $collection_where";
+        WHERE r.semester_id = ?";
+$bind_types = 'i';
+$bind_params = [$semester_id];
+
+if (!$is_super_admin) {
+    $sql .= " AND r.admin_id = ?";
+    $bind_types .= 'i';
+    $bind_params[] = $current_admin_id;
+}
+
+if ($collection_filter === 'not_taken') {
+    $sql .= " AND COALESCE(ri.is_cancelled, 0) = 0
+              AND COALESCE(ri.is_collected, 0) = 0";
+}
+
+if ($request_filter === 'paid') {
+    $sql .= " AND COALESCE(r.amount_paid, 0) + 0.009 >= GREATEST(COALESCE(r.total_amount, 0) - COALESCE(r.credit_used, 0), 0)";
+} elseif ($request_filter === 'partial') {
+    $sql .= " AND COALESCE(r.amount_paid, 0) > 0.009
+              AND COALESCE(r.amount_paid, 0) + 0.009 < GREATEST(COALESCE(r.total_amount, 0) - COALESCE(r.credit_used, 0), 0)";
+} elseif ($request_filter === 'unpaid') {
+    $sql .= " AND GREATEST(COALESCE(r.total_amount, 0) - COALESCE(r.credit_used, 0), 0) > 0.009
+              AND COALESCE(r.amount_paid, 0) <= 0.009";
+} elseif ($request_filter === 'pending') {
+    $sql .= " AND EXISTS (
+        SELECT 1 FROM request_items ri_pending
+        WHERE ri_pending.request_id = r.request_id
+          AND COALESCE(ri_pending.is_cancelled, 0) = 0
+          AND COALESCE(ri_pending.is_collected, 0) = 0
+    )";
+} elseif ($request_filter === 'given_out') {
+    $sql .= " AND NOT EXISTS (
+        SELECT 1 FROM request_items ri_pending
+        WHERE ri_pending.request_id = r.request_id
+          AND COALESCE(ri_pending.is_cancelled, 0) = 0
+          AND COALESCE(ri_pending.is_collected, 0) = 0
+    )";
+}
+
+if ($request_day !== '') {
+    $sql .= " AND DATE(r.created_at) = ?";
+    $bind_types .= 's';
+    $bind_params[] = $request_day;
+}
 
 if ($search !== '') {
     $sql .= " AND (
@@ -73,6 +123,30 @@ if ($search !== '') {
            OR s.index_number LIKE ?
            OR b.book_title LIKE ?
           )";
+    $search_pattern = '%' . $search . '%';
+    $bind_types .= 'sss';
+    array_push($bind_params, $search_pattern, $search_pattern, $search_pattern);
+}
+
+if ($selected_book_id > 0) {
+    $sql .= " AND ri.book_id = ?
+              AND COALESCE(ri.is_cancelled, 0) = 0";
+    $bind_types .= 'i';
+    $bind_params[] = $selected_book_id;
+
+    if ($book_status === 'taken') {
+        $sql .= " AND COALESCE(ri.is_collected, 0) = 1";
+    } elseif ($book_status === 'not_taken') {
+        $sql .= " AND COALESCE(ri.is_collected, 0) = 0
+                  AND COALESCE(r.amount_paid, 0) + COALESCE(r.credit_used, 0) + 0.009 >= (
+                      SELECT COALESCE(SUM(COALESCE(ri_covered.unit_price, b_covered.price, 0)), 0)
+                      FROM request_items ri_covered
+                      JOIN books b_covered ON b_covered.book_id = ri_covered.book_id
+                      WHERE ri_covered.request_id = r.request_id
+                        AND COALESCE(ri_covered.is_cancelled, 0) = 0
+                        AND ri_covered.item_id <= ri.item_id
+                  )";
+    }
 }
 
 $sql .= " ORDER BY display_date DESC";
@@ -80,20 +154,11 @@ $sql .= " ORDER BY display_date DESC";
 $stmt = $conn->prepare($sql);
 $result = null;
 if ($stmt) {
-    $search_pattern = '%' . $search . '%';
-    if ($is_super_admin) {
-        if ($search !== '') {
-            $stmt->bind_param('isss', $semester_id, $search_pattern, $search_pattern, $search_pattern);
-        } else {
-            $stmt->bind_param('i', $semester_id);
-        }
-    } else {
-        if ($search !== '') {
-            $stmt->bind_param('iisss', $semester_id, $current_admin_id, $search_pattern, $search_pattern, $search_pattern);
-        } else {
-            $stmt->bind_param('ii', $semester_id, $current_admin_id);
-        }
+    $bind_args = [$bind_types];
+    foreach ($bind_params as $param_index => $param_value) {
+        $bind_args[] = &$bind_params[$param_index];
     }
+    call_user_func_array([$stmt, 'bind_param'], $bind_args);
     $stmt->execute();
     $result = $stmt->get_result();
 }

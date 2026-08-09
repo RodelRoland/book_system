@@ -4,10 +4,7 @@ book_system_secure_session_start();
 require_once 'db.php';
 require_once 'setup_tasks.php';
 
-if (!isset($_SESSION['admin_logged_in']) || ($_SESSION['admin_role'] ?? '') !== 'super_admin') {
-    header('Location: admin.php');
-    exit;
-}
+book_system_require_admin_feature($conn, 'system_setup');
 
 $messages = [];
 $error_msg = '';

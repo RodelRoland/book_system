@@ -7,6 +7,15 @@ if (!isset($_SESSION['admin_logged_in'])) {
 }
 include 'db.php';
 
+$raw_return_url = trim((string)($_GET['return_url'] ?? $_POST['return_url'] ?? ''));
+$return_url = 'view_request.php';
+if ($raw_return_url !== '' && !preg_match('/^\w+:\/\//', $raw_return_url)) {
+    $normalized_return_url = ltrim($raw_return_url, '/');
+    if (stripos($normalized_return_url, 'view_request.php') === 0) {
+        $return_url = $normalized_return_url;
+    }
+}
+
 if (!isset($_GET['id'])) { die("Request ID missing."); }
 
 $access_context = function_exists('book_system_get_effective_rep_access_context')
@@ -73,7 +82,7 @@ if ($items_query) {
 // 3. Handle the Update Logic
 if ($_SERVER["REQUEST_METHOD"] == "POST") {
     if (!csrf_validate($_POST['csrf_token'] ?? null)) {
-        header('Location: edit_request.php?id=' . $request_id . '&msg=csrf_invalid');
+        header('Location: edit_request.php?id=' . $request_id . '&return_url=' . urlencode($return_url) . '&msg=csrf_invalid');
         exit;
     }
     $selected_books = isset($_POST['books']) ? $_POST['books'] : [];
@@ -150,7 +159,22 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
     }
     $upd_stmt->execute();
     
-    header("Location: view_request.php?msg=updated");
+    $return_parts = parse_url($return_url);
+    $return_path = strval($return_parts['path'] ?? 'view_request.php');
+    if ($return_path === '') {
+        $return_path = 'view_request.php';
+    }
+    $return_query = [];
+    if (!empty($return_parts['query'])) {
+        parse_str($return_parts['query'], $return_query);
+    }
+    $return_query['msg'] = 'updated';
+    $redirect_target = $return_path . '?' . http_build_query($return_query);
+    if (!empty($return_parts['fragment'])) {
+        $redirect_target .= '#' . $return_parts['fragment'];
+    }
+
+    header('Location: ' . $redirect_target);
     exit();
 }
 
@@ -272,12 +296,17 @@ if ($is_super_admin) {
         
         .btn-cancel {
             display: block;
+            width: 100%;
             text-align: center;
             margin-top: 15px;
             color: #888;
             text-decoration: none;
             font-size: 14px;
             transition: color 0.2s;
+            background: transparent;
+            border: none;
+            cursor: pointer;
+            padding: 6px 0;
         }
         .btn-cancel:hover { color: #333; }
     </style>
@@ -293,6 +322,7 @@ if ($is_super_admin) {
     <div class="card">
         <form method="POST">
             <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
+            <input type="hidden" name="return_url" value="<?php echo htmlspecialchars($return_url); ?>">
             <div class="section-title">Select Books</div>
             <div class="books-list">
                 <?php while($book = $all_books->fetch_assoc()): ?>
@@ -318,7 +348,7 @@ if ($is_super_admin) {
             </div>
 
             <button type="submit" class="btn-save">Update Request</button>
-            <a href="view_request.php" class="btn-cancel">Cancel</a>
+            <button type="button" class="btn-cancel" data-return-url="<?php echo htmlspecialchars($return_url); ?>" onclick="goBackToRequests(this)">Cancel</button>
         </form>
     </div>
 </div>
@@ -340,6 +370,33 @@ checkboxes.forEach(cb => cb.addEventListener('change', calculateTotal));
 
 // Calculate on page load
 calculateTotal();
+
+function goBackToRequests(button) {
+    const fallbackUrl = button?.dataset?.returnUrl || 'view_request.php';
+    const referrer = document.referrer || '';
+
+    if (referrer.indexOf('view_request.php') !== -1 && window.history.length > 1) {
+        let fallbackTriggered = false;
+        const fallbackTimer = window.setTimeout(() => {
+            fallbackTriggered = true;
+            window.location.href = fallbackUrl;
+        }, 700);
+
+        window.addEventListener('pageshow', function onPageShow() {
+            if (fallbackTriggered) {
+                return;
+            }
+
+            window.clearTimeout(fallbackTimer);
+            window.removeEventListener('pageshow', onPageShow);
+        });
+
+        window.history.back();
+        return;
+    }
+
+    window.location.href = fallbackUrl;
+}
 </script>
 
 <?php include 'footer.php'; ?>

@@ -4,6 +4,11 @@ $year = date('Y');
 
 <div style="margin-top: 30px; text-align: center; color: #8a8a8a; font-size: 13px; padding: 18px 0;">
     <div style="max-width: 1200px; margin: 0 auto; border-top: 1px solid rgba(0,0,0,0.08); padding-top: 16px;">
+        <div class="public-footer-links" style="display:flex; justify-content:center; flex-wrap:wrap; gap:14px; margin-bottom:12px;">
+            <a href="common_request_portal.php" style="color:#2563eb; font-weight:700; text-decoration:none;">Home / Request Portal</a>
+            <a href="about.php" style="color:#2563eb; font-weight:700; text-decoration:none;">About Us</a>
+            <a href="contact.php" style="color:#2563eb; font-weight:700; text-decoration:none;">Contact Us</a>
+        </div>
         &copy; <?php echo htmlspecialchars($year); ?> Roland Kitsi. All rights reserved.
     </div>
 </div>
@@ -122,5 +127,6 @@ $year = date('Y');
     .page-header h1 { font-size: 20px !important; }
     .page-header .subtitle { font-size: 12px !important; }
     .card h2 { font-size: 15px !important; }
+    .public-footer-links { gap: 10px !important; }
 }
 </style>

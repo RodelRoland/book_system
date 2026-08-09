@@ -8,11 +8,7 @@ if (!isset($_SESSION['admin_logged_in'])) {
     header("Location: login.php");
     exit;
 }
-
-if (($_SESSION['admin_role'] ?? '') !== 'super_admin') {
-    header("Location: rep_dashboard.php");
-    exit;
-}
+book_system_require_admin_feature($conn, 'maintenance');
 
 $message = "";
 

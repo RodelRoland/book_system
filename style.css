@@ -19,6 +19,77 @@ body {
     padding: 50px 14px;
 }
 
+.rep-assignment-card {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 14px;
+    align-items: center;
+    background: linear-gradient(135deg, #eef5ff 0%, #f8fbff 100%);
+    color: #1d4ed8;
+    border: 1px solid #bfdbfe;
+    padding: 14px 16px;
+    border-radius: 18px;
+    margin-bottom: 18px;
+    box-shadow: 0 18px 36px rgba(29, 78, 216, 0.08);
+}
+
+.rep-avatar-shell {
+    width: 72px;
+    height: 72px;
+    border-radius: 22px;
+    overflow: hidden;
+    flex-shrink: 0;
+    background: linear-gradient(135deg, #dbeafe 0%, #eff6ff 100%);
+    display: grid;
+    place-items: center;
+}
+
+.rep-avatar-image {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.rep-avatar-fallback {
+    width: 100%;
+    height: 100%;
+    display: grid;
+    place-items: center;
+    font-size: 1.35rem;
+    font-weight: 800;
+    color: #1d4ed8;
+}
+
+.rep-assignment-copy {
+    display: grid;
+    gap: 4px;
+}
+
+.rep-assignment-label {
+    display: inline-flex;
+    width: fit-content;
+    padding: 5px 10px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.85);
+    color: #1d4ed8;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+
+.rep-assignment-copy strong {
+    font-size: 1rem;
+    color: #0f172a;
+}
+
+.rep-assignment-copy p {
+    font-size: 0.9rem;
+    line-height: 1.55;
+    color: #334155;
+}
+
 /* ===== HEADINGS ===== */
 h2 {
     font-size: 1.45rem;
@@ -142,10 +213,20 @@ button[type="submit"]:active {
 
 .form-step {
     display: none;
+    opacity: 0;
+    transform: translateY(8px);
+    transition: opacity 0.28s ease, transform 0.28s ease;
 }
 
 .form-step.active {
     display: block;
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.form-step.is-transitioning {
+    opacity: 0.4;
+    transform: translateY(8px);
 }
 
 .step-header {
@@ -189,10 +270,49 @@ button[type="submit"]:active {
     border-radius: 10px;
     cursor: pointer;
     margin-top: 1.4rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    transition: transform 0.2s ease, box-shadow 0.2s ease, opacity 0.2s ease;
+    box-shadow: 0 16px 30px rgba(107, 70, 193, 0.18);
 }
 
 .primary-btn:active {
     background: #4c1d95;
+}
+
+.primary-btn:hover {
+    transform: translateY(-1px);
+}
+
+.primary-btn:disabled {
+    opacity: 0.82;
+    cursor: progress;
+}
+
+.primary-btn .button-spinner {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    border: 2px solid rgba(255, 255, 255, 0.35);
+    border-top-color: #ffffff;
+    display: none;
+    animation: request-spin 0.85s linear infinite;
+}
+
+.primary-btn.is-loading .button-spinner {
+    display: inline-block;
+}
+
+.primary-btn.is-loading {
+    transform: translateY(-1px);
+}
+
+@keyframes request-spin {
+    to {
+        transform: rotate(360deg);
+    }
 }
 
 .secondary-btn {
@@ -219,6 +339,41 @@ button[type="submit"]:active {
     color: #6b7280;
     text-align: center;
     margin-top: 1rem;
+}
+
+.request-nav-links {
+    display: grid;
+    gap: 12px;
+    margin-top: 20px;
+}
+
+.portal-nav-button {
+    width: 100%;
+    text-decoration: none;
+    border-radius: 12px;
+    padding: 13px 16px;
+    font-size: 0.98rem;
+    font-weight: 600;
+    text-align: center;
+    transition: transform 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
+}
+
+.secondary-nav-button {
+    background: #eef2ff;
+    border: 1px solid #c7d2fe;
+    color: #4338ca;
+}
+
+.offers-nav-button {
+    background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);
+    border: 1px solid #bfdbfe;
+    color: #1d4ed8;
+}
+
+.portal-nav-button:hover,
+.portal-nav-button:focus-visible {
+    transform: translateY(-1px);
+    box-shadow: 0 14px 30px rgba(15, 23, 42, 0.08);
 }
 
 .totals-divider {
@@ -256,6 +411,30 @@ button[type="submit"]:active {
     font-size: 1rem;
     color: #374151;
     margin-bottom: 0.6rem;
+}
+
+@media (min-width: 720px) {
+    .container {
+        max-width: 720px;
+        margin: 0 auto;
+        padding: 56px 22px 72px;
+    }
+
+    .request-nav-links {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 480px) {
+    .container {
+        padding-top: 32px;
+    }
+
+    .rep-assignment-card {
+        grid-template-columns: 1fr;
+        text-align: center;
+        justify-items: center;
+    }
 }
 
 .detail-row {

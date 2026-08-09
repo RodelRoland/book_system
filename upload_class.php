@@ -2,6 +2,12 @@
 require_once __DIR__ . '/security_bootstrap.php';
 book_system_secure_session_start();
 require_once 'db.php';
+if (file_exists(__DIR__ . '/setup_tasks.php')) {
+    require_once __DIR__ . '/setup_tasks.php';
+    if (function_exists('book_system_run_setup_tasks')) {
+        book_system_run_setup_tasks($conn);
+    }
+}
 
 if (!isset($_SESSION['admin_logged_in'])) {
     header('Location: login.php');
@@ -19,74 +25,144 @@ if (!$access_context) {
 $current_admin_id = intval($access_context['effective_admin_id'] ?? 0);
 $current_admin_role = 'rep';
 $is_super_admin = false;
-$dashboard_url = (($access_context['session_role'] ?? '') === 'super_admin' && empty($access_context['is_workspace_mode']))
+$dashboard_url = (($access_context['session_role'] ?? '') === 'super_admin'
+    && empty($access_context['is_workspace_mode'])
+    && empty($access_context['is_own_rep_mode']))
     ? 'admin.php'
     : 'rep_dashboard.php';
+$rep_bottom_nav_active = '';
 
 $success_msg = '';
 $error_msg = '';
 $imported_count = 0;
 $skipped_count = 0;
+$excel_dependency_ready = false;
+$excel_dependency_message = '';
+$semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
+if ($semester_id <= 0 && function_exists('book_system_get_active_semester_id')) {
+    $semester_id = book_system_get_active_semester_id($conn);
+}
 
 $csrf_token = csrf_get_token();
 
-// Handle CSV upload
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['upload_csv'])) {
+function upload_class_normalized_index(string $indexNumber): string
+{
+    return function_exists('book_system_normalize_index_number')
+        ? book_system_normalize_index_number($indexNumber)
+        : strtoupper(preg_replace('/[^A-Z0-9]+/', '', trim($indexNumber)));
+}
+
+$autoload_path = __DIR__ . '/vendor/autoload.php';
+if (file_exists($autoload_path)) {
+    require_once $autoload_path;
+}
+
+if (class_exists('\\PhpOffice\\PhpSpreadsheet\\IOFactory')) {
+    $excel_dependency_ready = true;
+} else {
+    $excel_dependency_message = 'Excel import requires PhpSpreadsheet. Install it in your local book_system folder with: composer require phpoffice/phpspreadsheet';
+}
+
+// Handle Excel upload
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['upload_excel'])) {
     if (!csrf_validate($_POST['csrf_token'] ?? null)) {
         $error_msg = 'Invalid request. Please refresh and try again.';
-    } elseif (isset($_FILES['csv_file']) && $_FILES['csv_file']['error'] === UPLOAD_ERR_OK) {
-        $file = $_FILES['csv_file']['tmp_name'];
-        $handle = fopen($file, 'r');
-        
-        if ($handle) {
-            // Skip header row if checkbox is checked
-            $skip_header = isset($_POST['skip_header']);
-            if ($skip_header) {
-                fgetcsv($handle);
-            }
-            
-            $stmt = $conn->prepare("INSERT INTO class_students (admin_id, index_number, student_name) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE student_name = VALUES(student_name)");
-            
-            while (($row = fgetcsv($handle)) !== false) {
-                if (count($row) >= 2) {
-                    $index_number = trim($row[0]);
-                    $student_name = trim($row[1]);
-                    
-                    if ($index_number !== '' && $student_name !== '') {
-                        $stmt->bind_param("iss", $current_admin_id, $index_number, $student_name);
-                        if ($stmt->execute()) {
-                            $imported_count++;
+    } elseif (!$excel_dependency_ready) {
+        $error_msg = $excel_dependency_message;
+    } elseif (isset($_FILES['excel_file']) && $_FILES['excel_file']['error'] === UPLOAD_ERR_OK) {
+        $file = $_FILES['excel_file']['tmp_name'];
+        $original_name = strval($_FILES['excel_file']['name'] ?? '');
+        $extension = strtolower(pathinfo($original_name, PATHINFO_EXTENSION));
+        $allowed_extensions = ['xlsx', 'xls'];
+
+        if (!in_array($extension, $allowed_extensions, true)) {
+            $error_msg = 'Please upload a valid Excel file (.xlsx or .xls).';
+        } else {
+            try {
+                $skip_header = isset($_POST['skip_header']);
+                $reader = \PhpOffice\PhpSpreadsheet\IOFactory::createReaderForFile($file);
+                if (method_exists($reader, 'setReadDataOnly')) {
+                    $reader->setReadDataOnly(true);
+                }
+                $spreadsheet = $reader->load($file);
+                $worksheet = $spreadsheet->getSheet(0);
+                $highest_row = intval($worksheet->getHighestDataRow());
+                $start_row = $skip_header ? 2 : 1;
+
+                if ($highest_row < $start_row) {
+                    $error_msg = 'The Excel sheet does not contain any student rows to import.';
+                } else {
+                    $seen_index_numbers = [];
+                    $has_valid_rows = false;
+                    $stmt = $conn->prepare("INSERT INTO class_students (admin_id, semester_id, index_number, normalized_index_number, student_name) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE student_name = VALUES(student_name), normalized_index_number = VALUES(normalized_index_number)");
+
+                    if ($stmt) {
+                        for ($row_number = $start_row; $row_number <= $highest_row; $row_number++) {
+                            $index_number = trim(strval($worksheet->getCell('A' . $row_number)->getFormattedValue()));
+                            $student_name = trim(strval($worksheet->getCell('B' . $row_number)->getFormattedValue()));
+
+                            if ($index_number === '' && $student_name === '') {
+                                $skipped_count++;
+                                continue;
+                            }
+
+                            $duplicate_key = strtolower($index_number);
+                            if (isset($seen_index_numbers[$duplicate_key])) {
+                                $skipped_count++;
+                                continue;
+                            }
+
+                            $seen_index_numbers[$duplicate_key] = true;
+
+                            if ($index_number !== '' && $student_name !== '') {
+                                $has_valid_rows = true;
+                                $normalized_index_number = upload_class_normalized_index($index_number);
+                                $stmt->bind_param("iisss", $current_admin_id, $semester_id, $index_number, $normalized_index_number, $student_name);
+                                if ($stmt->execute()) {
+                                    $imported_count++;
+                                } else {
+                                    $skipped_count++;
+                                }
+                            } else {
+                                $skipped_count++;
+                            }
+                        }
+
+                        if ($imported_count > 0) {
+                            if (function_exists('book_system_audit_log')) {
+                                book_system_audit_log($conn, 'upload_class_excel', 'class_students', $current_admin_id, [
+                                    'imported_count' => $imported_count,
+                                    'skipped_count' => $skipped_count,
+                                ], $current_admin_id);
+                            }
+                            $success_msg = "Successfully imported/updated $imported_count students.";
+                            if ($skipped_count > 0) {
+                                $success_msg .= " Skipped $skipped_count invalid rows.";
+                            }
+                            if ($imported_count > 0 && function_exists('book_system_bump_portal_lookup_cache_version')) {
+                                book_system_bump_portal_lookup_cache_version($conn);
+                            }
+                        } elseif (!$has_valid_rows) {
+                            $error_msg = 'No valid records found in the Excel file.';
                         } else {
-                            $skipped_count++;
+                            $error_msg = 'No students were imported from the Excel file.';
                         }
                     } else {
-                        $skipped_count++;
+                        $error_msg = 'Could not prepare the class import process.';
                     }
-                } else {
-                    $skipped_count++;
+                }
+            } catch (Throwable $e) {
+                $error_msg = 'We could not read that Excel file. Please make sure it is a valid .xlsx or .xls file with Column A = index_number and Column B = student_name.';
+                if (function_exists('book_system_security_debug_enabled') && book_system_security_debug_enabled()) {
+                    $error_msg .= ' Details: ' . $e->getMessage();
                 }
             }
-            fclose($handle);
-            
-            if ($imported_count > 0) {
-                if (function_exists('book_system_audit_log')) {
-                    book_system_audit_log($conn, 'upload_class_csv', 'class_students', $current_admin_id, [
-                        'imported_count' => $imported_count,
-                        'skipped_count' => $skipped_count,
-                    ], $current_admin_id);
-                }
-                $success_msg = "Successfully imported/updated $imported_count students.";
-                if ($skipped_count > 0) {
-                    $success_msg .= " Skipped $skipped_count invalid rows.";
-                }
-            } else {
-                $error_msg = "No valid records found in the CSV file.";
-            }
-        } else {
-            $error_msg = "Could not open the uploaded file.";
         }
     } else {
-        $error_msg = "Please select a valid CSV file to upload.";
+        $upload_error = intval($_FILES['excel_file']['error'] ?? UPLOAD_ERR_NO_FILE);
+        $error_msg = $upload_error === UPLOAD_ERR_NO_FILE
+            ? 'Please select a valid Excel file to upload.'
+            : 'The Excel file could not be uploaded. Please try again with a valid .xlsx or .xls file.';
     }
 }
 
@@ -99,9 +175,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_student'])) {
     $student_name = trim($_POST['student_name'] ?? '');
     
     if ($index_number !== '' && $student_name !== '') {
-        $stmt = $conn->prepare("INSERT INTO class_students (admin_id, index_number, student_name) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE student_name = VALUES(student_name)");
-        $stmt->bind_param("iss", $current_admin_id, $index_number, $student_name);
+        $stmt = $conn->prepare("INSERT INTO class_students (admin_id, semester_id, index_number, normalized_index_number, student_name) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE student_name = VALUES(student_name), normalized_index_number = VALUES(normalized_index_number)");
+        $normalized_index_number = upload_class_normalized_index($index_number);
+        $stmt->bind_param("iisss", $current_admin_id, $semester_id, $index_number, $normalized_index_number, $student_name);
         if ($stmt->execute()) {
+            if (function_exists('book_system_bump_portal_lookup_cache_version')) {
+                book_system_bump_portal_lookup_cache_version($conn);
+            }
             if (function_exists('book_system_audit_log')) {
                 book_system_audit_log($conn, 'add_class_student', 'class_students', intval($stmt->insert_id), [
                     'index_number' => $index_number,
@@ -125,9 +205,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_student'])) {
     } else {
     $id = intval($_POST['student_id'] ?? 0);
     if ($id > 0) {
-        $stmt = $conn->prepare("DELETE FROM class_students WHERE id = ? AND admin_id = ?");
-        $stmt->bind_param("ii", $id, $current_admin_id);
+        $stmt = $conn->prepare("DELETE FROM class_students WHERE id = ? AND admin_id = ? AND semester_id = ?");
+        $stmt->bind_param("iii", $id, $current_admin_id, $semester_id);
         if ($stmt->execute()) {
+            if (function_exists('book_system_bump_portal_lookup_cache_version')) {
+                book_system_bump_portal_lookup_cache_version($conn);
+            }
             if (function_exists('book_system_audit_log')) {
                 book_system_audit_log($conn, 'delete_class_student', 'class_students', $id, [], $current_admin_id);
             }
@@ -144,9 +227,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['clear_all'])) {
     if (!csrf_validate($_POST['csrf_token'] ?? null)) {
         $error_msg = 'Invalid request. Please refresh and try again.';
     } else {
-    $stmt = $conn->prepare("DELETE FROM class_students WHERE admin_id = ?");
-    $stmt->bind_param("i", $current_admin_id);
+    $stmt = $conn->prepare("DELETE FROM class_students WHERE admin_id = ? AND semester_id = ?");
+    $stmt->bind_param("ii", $current_admin_id, $semester_id);
     if ($stmt->execute()) {
+        if (function_exists('book_system_bump_portal_lookup_cache_version')) {
+            book_system_bump_portal_lookup_cache_version($conn);
+        }
         if (function_exists('book_system_audit_log')) {
             book_system_audit_log($conn, 'clear_class_students', 'class_students', $current_admin_id, [], $current_admin_id);
         }
@@ -164,24 +250,24 @@ $total_students = 0;
 
 if ($search !== '') {
     $like = '%' . $search . '%';
-    $stmt = $conn->prepare("SELECT * FROM class_students WHERE admin_id = ? AND (index_number LIKE ? OR student_name LIKE ?) ORDER BY student_name ASC LIMIT 500");
+    $stmt = $conn->prepare("SELECT * FROM class_students WHERE admin_id = ? AND semester_id = ? AND (index_number LIKE ? OR student_name LIKE ?) ORDER BY COALESCE(NULLIF(normalized_index_number, ''), index_number) ASC, student_name ASC LIMIT 500");
     if ($stmt) {
-        $stmt->bind_param('iss', $current_admin_id, $like, $like);
+        $stmt->bind_param('iiss', $current_admin_id, $semester_id, $like, $like);
         $stmt->execute();
         $students_result = $stmt->get_result();
     }
 } else {
-    $stmt = $conn->prepare("SELECT * FROM class_students WHERE admin_id = ? ORDER BY student_name ASC LIMIT 500");
+    $stmt = $conn->prepare("SELECT * FROM class_students WHERE admin_id = ? AND semester_id = ? ORDER BY COALESCE(NULLIF(normalized_index_number, ''), index_number) ASC, student_name ASC LIMIT 500");
     if ($stmt) {
-        $stmt->bind_param('i', $current_admin_id);
+        $stmt->bind_param('ii', $current_admin_id, $semester_id);
         $stmt->execute();
         $students_result = $stmt->get_result();
     }
 }
 
-$cnt = $conn->prepare("SELECT COUNT(*) AS c FROM class_students WHERE admin_id = ?");
+$cnt = $conn->prepare("SELECT COUNT(*) AS c FROM class_students WHERE admin_id = ? AND semester_id = ?");
 if ($cnt) {
-    $cnt->bind_param('i', $current_admin_id);
+    $cnt->bind_param('ii', $current_admin_id, $semester_id);
     $cnt->execute();
     $cres = $cnt->get_result();
     if ($cres && $cres->num_rows === 1) {
@@ -348,7 +434,7 @@ if ($cnt) {
         }
         .checkbox-label input { width: 18px; height: 18px; }
         
-        .csv-format {
+        .excel-format {
             background: #f8f9fa;
             padding: 15px;
             border-radius: 8px;
@@ -356,32 +442,18 @@ if ($cnt) {
             color: #666;
             margin-top: 15px;
         }
-        .csv-format code { background: #e9ecef; padding: 2px 6px; border-radius: 4px; }
-        .preview-box {
-            margin-top: 18px;
+        .excel-format code { background: #e9ecef; padding: 2px 6px; border-radius: 4px; }
+        .helper-note {
+            margin-top: 12px;
             text-align: left;
-            background: #f8fafc;
-            border: 1px solid #e2e8f0;
+            background: #fff7ed;
+            border: 1px solid #fed7aa;
+            color: #9a3412;
             border-radius: 10px;
-            padding: 14px;
-            display: none;
-        }
-        .preview-box h4 {
-            margin-bottom: 8px;
-            color: #1f2937;
-            font-size: 14px;
-        }
-        .preview-summary {
+            padding: 12px 14px;
             font-size: 13px;
-            color: #475569;
-            margin-bottom: 10px;
+            line-height: 1.6;
         }
-        .preview-table {
-            width: 100%;
-            font-size: 12px;
-        }
-        .preview-valid { color: #166534; font-weight: 700; }
-        .preview-invalid { color: #b91c1c; font-weight: 700; }
     </style>
 </head>
 <body>
@@ -410,38 +482,27 @@ if ($cnt) {
         <h2>Import Students</h2>
         <div class="upload-section">
             <div class="upload-box">
-                <h3 style="margin-bottom: 15px; color: #333;">&#128194; Upload CSV File</h3>
+                <h3 style="margin-bottom: 15px; color: #333;">&#128194; Upload Excel File</h3>
                 <form method="POST" enctype="multipart/form-data">
                     <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
                     <div class="form-group">
-                        <input type="file" id="csv_file" name="csv_file" accept=".csv,.txt" required>
+                        <input type="file" id="excel_file" name="excel_file" accept=".xlsx,.xls,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" required>
                     </div>
                     <label class="checkbox-label">
-                        <input type="checkbox" id="skip_header" name="skip_header" checked>
+                        <input type="checkbox" name="skip_header" checked>
                         Skip first row (header)
                     </label>
-                    <button type="submit" id="upload_csv_btn" name="upload_csv" class="btn btn-primary">Upload CSV</button>
+                    <button type="submit" name="upload_excel" class="btn btn-primary">Upload Excel</button>
                 </form>
-                <div class="csv-format">
-                    <strong>CSV Format:</strong><br>
-                    <code>index_number, student_name</code><br>
-                    Example: <code>PS/CSC/21/0001, Roland Kitsi</code>
+                <div class="excel-format">
+                    <strong>Excel Format:</strong><br>
+                    <code>Column A = index_number</code><br>
+                    <code>Column B = student_name</code><br>
+                    Example: <code>PS/CSC/21/0001 | Roland Kitsi</code>
                 </div>
-                <div id="csv_preview_box" class="preview-box">
-                    <h4>CSV Validation Preview</h4>
-                    <div id="csv_preview_summary" class="preview-summary"></div>
-                    <table class="preview-table">
-                        <thead>
-                            <tr>
-                                <th>Row</th>
-                                <th>Index Number</th>
-                                <th>Student Name</th>
-                                <th>Status</th>
-                            </tr>
-                        </thead>
-                        <tbody id="csv_preview_body"></tbody>
-                    </table>
-                </div>
+                <?php if (!$excel_dependency_ready): ?>
+                    <div class="helper-note"><?php echo htmlspecialchars($excel_dependency_message); ?></div>
+                <?php endif; ?>
             </div>
             
             <div class="upload-box">
@@ -510,108 +571,14 @@ if ($cnt) {
         </table>
         <?php else: ?>
         <p style="text-align: center; color: #888; padding: 40px;">
-            <?php echo $search ? 'No students found matching your search.' : 'No students in your class list yet. Upload a CSV or add students manually above.'; ?>
+            <?php echo $search ? 'No students found matching your search.' : 'No students in your class list yet. Upload an Excel file or add students manually above.'; ?>
         </p>
         <?php endif; ?>
     </div>
 </div>
 
+<?php include __DIR__ . '/rep_bottom_nav.php'; ?>
 <?php include 'footer.php'; ?>
-<script>
-function parseCsvLine(line) {
-    var values = [];
-    var current = '';
-    var inQuotes = false;
-
-    for (var i = 0; i < line.length; i++) {
-        var char = line[i];
-        if (char === '"') {
-            if (inQuotes && line[i + 1] === '"') {
-                current += '"';
-                i++;
-            } else {
-                inQuotes = !inQuotes;
-            }
-        } else if (char === ',' && !inQuotes) {
-            values.push(current.trim());
-            current = '';
-        } else {
-            current += char;
-        }
-    }
-
-    values.push(current.trim());
-    return values;
-}
-
-function renderCsvPreview() {
-    var input = document.getElementById('csv_file');
-    var skipHeader = document.getElementById('skip_header');
-    var previewBox = document.getElementById('csv_preview_box');
-    var previewBody = document.getElementById('csv_preview_body');
-    var previewSummary = document.getElementById('csv_preview_summary');
-    var uploadButton = document.getElementById('upload_csv_btn');
-
-    previewBody.innerHTML = '';
-    previewSummary.textContent = '';
-    previewBox.style.display = 'none';
-    uploadButton.disabled = false;
-
-    if (!input || !input.files || !input.files[0]) {
-        return;
-    }
-
-    var reader = new FileReader();
-    reader.onload = function(event) {
-        var text = String(event.target.result || '').replace(/\r/g, '');
-        var rawLines = text.split('\n').filter(function(line) {
-            return line.trim() !== '';
-        });
-        var lines = skipHeader.checked ? rawLines.slice(1) : rawLines.slice();
-        var validCount = 0;
-        var invalidCount = 0;
-        var previewLimit = 8;
-
-        lines.forEach(function(line, index) {
-            var columns = parseCsvLine(line);
-            var indexNumber = (columns[0] || '').trim();
-            var studentName = (columns[1] || '').trim();
-            var isValid = indexNumber !== '' && studentName !== '';
-
-            if (isValid) {
-                validCount++;
-            } else {
-                invalidCount++;
-            }
-
-            if (index < previewLimit) {
-                var row = document.createElement('tr');
-                row.innerHTML =
-                    '<td>' + (skipHeader.checked ? index + 2 : index + 1) + '</td>' +
-                    '<td>' + indexNumber.replace(/</g, '&lt;') + '</td>' +
-                    '<td>' + studentName.replace(/</g, '&lt;') + '</td>' +
-                    '<td class="' + (isValid ? 'preview-valid' : 'preview-invalid') + '">' + (isValid ? 'Valid' : 'Missing data') + '</td>';
-                previewBody.appendChild(row);
-            }
-        });
-
-        if (lines.length > previewLimit) {
-            var moreRow = document.createElement('tr');
-            moreRow.innerHTML = '<td colspan="4">Preview limited to the first ' + previewLimit + ' data rows.</td>';
-            previewBody.appendChild(moreRow);
-        }
-
-        previewSummary.textContent = validCount + ' valid row(s), ' + invalidCount + ' invalid row(s) detected.';
-        previewBox.style.display = 'block';
-        uploadButton.disabled = (validCount === 0);
-    };
-
-    reader.readAsText(input.files[0]);
-}
-
-document.getElementById('csv_file').addEventListener('change', renderCsvPreview);
-document.getElementById('skip_header').addEventListener('change', renderCsvPreview);
-</script>
 </body>
 </html>
 

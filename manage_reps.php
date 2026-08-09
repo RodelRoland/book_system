@@ -7,6 +7,7 @@ if (file_exists(__DIR__ . '/setup_tasks.php')) {
     if (function_exists('book_system_setup_ensure_column')) {
         book_system_setup_ensure_column($conn, 'admins', 'academic_level', 'VARCHAR(10) NULL AFTER class_name');
         book_system_setup_ensure_column($conn, 'admins', 'program_name', 'VARCHAR(100) NULL AFTER academic_level');
+        book_system_setup_ensure_column($conn, 'admins', 'department_id', 'INT NULL AFTER program_name');
         book_system_setup_ensure_column($conn, 'admins', 'show_on_public_portal', 'TINYINT(1) NOT NULL DEFAULT 1 AFTER program_name');
         book_system_setup_ensure_column($conn, 'admins', 'allow_super_admin_access', 'TINYINT(1) NOT NULL DEFAULT 0 AFTER show_on_public_portal');
         book_system_setup_ensure_column($conn, 'admins', 'trial_started_at', 'DATETIME NULL AFTER approved_at');
@@ -14,21 +15,73 @@ if (file_exists(__DIR__ . '/setup_tasks.php')) {
         book_system_setup_ensure_column($conn, 'admins', 'subscription_active', 'TINYINT(1) NOT NULL DEFAULT 0 AFTER trial_expires_at');
         book_system_setup_ensure_column($conn, 'admins', 'subscription_started_at', 'DATETIME NULL AFTER subscription_active');
         book_system_setup_ensure_column($conn, 'admins', 'subscription_expires_at', 'DATETIME NULL AFTER subscription_started_at');
+        book_system_setup_ensure_column($conn, 'admins', 'payment_method', "VARCHAR(20) NOT NULL DEFAULT 'manual_momo' AFTER account_name");
+        book_system_setup_ensure_column($conn, 'admins', 'momo_network', 'VARCHAR(30) NULL AFTER account_name');
+        book_system_setup_ensure_column($conn, 'admins', 'paystack_enabled', 'TINYINT(1) NOT NULL DEFAULT 0 AFTER momo_network');
+        book_system_setup_ensure_column($conn, 'admins', 'paystack_public_key', 'VARCHAR(255) NULL AFTER paystack_enabled');
+        book_system_setup_ensure_column($conn, 'admins', 'paystack_secret_key', 'VARCHAR(255) NULL AFTER paystack_public_key');
     }
 }
 
-// Only super_admin can access this page
-if (!isset($_SESSION['admin_logged_in']) || $_SESSION['admin_role'] !== 'super_admin') {
-    header('Location: admin.php');
-    exit;
-}
+book_system_require_admin_feature($conn, 'manage_reps');
 
+$session_admin_role = strval($_SESSION['admin_role'] ?? '');
 $success_msg = '';
 $error_msg = '';
 
+if (isset($_GET['reset_status'])) {
+    $reset_rep_name = trim(strval($_GET['rep_name'] ?? ''));
+    $reset_semester_name = trim(strval($_GET['semester_name'] ?? ''));
+    $reset_label_parts = array_values(array_filter([$reset_rep_name, $reset_semester_name], static function ($value): bool {
+        return trim(strval($value)) !== '';
+    }));
+    $reset_label = empty($reset_label_parts) ? 'the selected scope' : implode(' / ', $reset_label_parts);
+
+    if (strval($_GET['reset_status']) === 'success') {
+        $success_msg = 'Semester records cleared for ' . $reset_label . '.';
+    } elseif (strval($_GET['reset_status']) === 'empty') {
+        $success_msg = 'There were no semester records to clear for ' . $reset_label . '.';
+    }
+}
+
 $csrf_token = csrf_get_token();
 
-// Handle form submissions
+function book_system_fetch_departments(mysqli $conn): array
+{
+    $rows = [];
+    $result = $conn->query("SELECT department_id, department_name, department_code, is_active
+        FROM departments
+        ORDER BY is_active DESC, department_name ASC");
+    if ($result) {
+        while ($row = $result->fetch_assoc()) {
+            $rows[] = $row;
+        }
+    }
+    return $rows;
+}
+
+function book_system_department_name_by_id(mysqli $conn, int $department_id): string
+{
+    if ($department_id <= 0) {
+        return '';
+    }
+    $stmt = $conn->prepare("SELECT department_name FROM departments WHERE department_id = ? LIMIT 1");
+    if (!$stmt) {
+        return '';
+    }
+    $stmt->bind_param('i', $department_id);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    return trim(strval($row['department_name'] ?? ''));
+}
+
+$departments = book_system_fetch_departments($conn);
+$access_mode_config = function_exists('book_system_get_access_mode_config')
+    ? book_system_get_access_mode_config($conn)
+    : ['effective_mode' => 'premium_active'];
+$is_premium_trial_mode = strval($access_mode_config['effective_mode'] ?? 'premium_active') === 'premium_active';
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!csrf_validate($_POST['csrf_token'] ?? null)) {
         $error_msg = 'Invalid request. Please refresh and try again.';
@@ -41,20 +94,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $full_name = trim($_POST['full_name'] ?? '');
         $class_name = trim($_POST['class_name'] ?? '');
         $academic_level = preg_replace('/[^0-9]/', '', strval($_POST['academic_level'] ?? ''));
-        $program_name = trim($_POST['program_name'] ?? '');
+        $department_id = intval($_POST['department_id'] ?? 0);
+        $program_name = book_system_department_name_by_id($conn, $department_id);
         $show_on_public_portal = isset($_POST['show_on_public_portal']) ? 1 : 0;
         $allow_super_admin_access = isset($_POST['allow_super_admin_access']) ? 1 : 0;
         $momo_number = trim($_POST['momo_number'] ?? '');
         $account_number = trim($_POST['account_number'] ?? '');
         $account_name = trim($_POST['account_name'] ?? '');
         $bank_name = trim($_POST['bank_name'] ?? '');
+        $momo_network = function_exists('book_system_normalize_momo_network')
+            ? book_system_normalize_momo_network($_POST['momo_network'] ?? '')
+            : trim($_POST['momo_network'] ?? '');
+        $payment_method = function_exists('book_system_normalize_payment_method')
+            ? book_system_normalize_payment_method($_POST['payment_method'] ?? 'manual_momo')
+            : 'manual_momo';
+        $paystack_enabled = isset($_POST['paystack_enabled']) ? 1 : 0;
+        $paystack_public_key = trim($_POST['paystack_public_key'] ?? '');
+        $paystack_secret_key = trim($_POST['paystack_secret_key'] ?? '');
         
         if (empty($username) || empty($password) || empty($full_name)) {
             $error_msg = "Username, password, and full name are required.";
+        } elseif ($department_id <= 0 || $program_name === '') {
+            $error_msg = "Please select a department.";
         } elseif (strlen($password) < 6) {
             $error_msg = "Password must be at least 6 characters.";
         } else {
-            // Check if username exists
             $check = $conn->prepare("SELECT admin_id FROM admins WHERE username = ?");
             $check->bind_param("s", $username);
             $check->execute();
@@ -62,9 +126,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $error_msg = "Username '$username' already exists.";
             } else {
                 $password_hash = password_hash($password, PASSWORD_DEFAULT);
-                $stmt = $conn->prepare("INSERT INTO admins (username, password_hash, full_name, class_name, academic_level, program_name, show_on_public_portal, allow_super_admin_access, momo_number, account_number, account_name, bank_name, role, approved_at, trial_started_at, trial_expires_at, subscription_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'rep', NOW(), NOW(), DATE_ADD(CURDATE(), INTERVAL 7 DAY), 0)");
-                $stmt->bind_param("ssssssiissss", $username, $password_hash, $full_name, $class_name, $academic_level, $program_name, $show_on_public_portal, $allow_super_admin_access, $momo_number, $account_number, $account_name, $bank_name);
+                $trial_started_at = $is_premium_trial_mode ? date('Y-m-d H:i:s') : null;
+                $trial_expires_at = $is_premium_trial_mode ? book_system_trial_expiry_from_start($trial_started_at) : null;
+                $stmt = $conn->prepare("INSERT INTO admins (username, password_hash, full_name, class_name, academic_level, program_name, department_id, show_on_public_portal, allow_super_admin_access, momo_number, account_name, momo_network, payment_method, paystack_enabled, paystack_public_key, paystack_secret_key, account_number, bank_name, role, approved_at, trial_started_at, trial_expires_at, subscription_active) VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, 0), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'rep', NOW(), ?, ?, 0)");
+                $stmt->bind_param("ssssssiiissssissssss", $username, $password_hash, $full_name, $class_name, $academic_level, $program_name, $department_id, $show_on_public_portal, $allow_super_admin_access, $momo_number, $account_name, $momo_network, $payment_method, $paystack_enabled, $paystack_public_key, $paystack_secret_key, $account_number, $bank_name, $trial_started_at, $trial_expires_at);
                 if ($stmt->execute()) {
+                    if (function_exists('book_system_bump_portal_lookup_cache_version')) {
+                        book_system_bump_portal_lookup_cache_version($conn);
+                    }
                     $success_msg = "Rep account '$username' created successfully!";
                 } else {
                     $error_msg = "Failed to create account: " . $conn->error;
@@ -78,6 +147,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($stmt) {
                 $stmt->bind_param('i', $admin_id);
                 $stmt->execute();
+                if ($stmt->affected_rows > 0 && function_exists('book_system_bump_portal_lookup_cache_version')) {
+                    book_system_bump_portal_lookup_cache_version($conn);
+                }
             }
             if (intval($_SESSION['super_admin_rep_context_id'] ?? 0) === $admin_id) {
                 unset($_SESSION['super_admin_rep_context_id']);
@@ -122,21 +194,83 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $full_name = trim($_POST['full_name'] ?? '');
         $class_name = trim($_POST['class_name'] ?? '');
         $academic_level = preg_replace('/[^0-9]/', '', strval($_POST['academic_level'] ?? ''));
-        $program_name = trim($_POST['program_name'] ?? '');
+        $department_id = intval($_POST['department_id'] ?? 0);
+        $program_name = book_system_department_name_by_id($conn, $department_id);
         $show_on_public_portal = isset($_POST['show_on_public_portal']) ? 1 : 0;
         $allow_super_admin_access = isset($_POST['allow_super_admin_access']) ? 1 : 0;
         $momo_number = trim($_POST['momo_number'] ?? '');
         $account_number = trim($_POST['account_number'] ?? '');
         $account_name = trim($_POST['account_name'] ?? '');
         $bank_name = trim($_POST['bank_name'] ?? '');
-        if ($admin_id > 0 && !empty($full_name)) {
-            $stmt = $conn->prepare("UPDATE admins SET full_name = ?, class_name = ?, academic_level = ?, program_name = ?, show_on_public_portal = ?, allow_super_admin_access = ?, momo_number = ?, account_number = ?, account_name = ?, bank_name = ? WHERE admin_id = ? AND role = 'rep'");
-            $stmt->bind_param("ssssiissssi", $full_name, $class_name, $academic_level, $program_name, $show_on_public_portal, $allow_super_admin_access, $momo_number, $account_number, $account_name, $bank_name, $admin_id);
+        $momo_network = function_exists('book_system_normalize_momo_network')
+            ? book_system_normalize_momo_network($_POST['momo_network'] ?? '')
+            : trim($_POST['momo_network'] ?? '');
+        $payment_method = function_exists('book_system_normalize_payment_method')
+            ? book_system_normalize_payment_method($_POST['payment_method'] ?? 'manual_momo')
+            : 'manual_momo';
+        $paystack_enabled = isset($_POST['paystack_enabled']) ? 1 : 0;
+        $paystack_public_key = trim($_POST['paystack_public_key'] ?? '');
+        $paystack_secret_key = trim($_POST['paystack_secret_key'] ?? '');
+        if ($admin_id > 0 && !empty($full_name) && $department_id > 0 && $program_name !== '') {
+            if ($paystack_secret_key === '') {
+                $secretStmt = $conn->prepare("SELECT paystack_secret_key FROM admins WHERE admin_id = ? AND role = 'rep' LIMIT 1");
+                if ($secretStmt) {
+                    $secretStmt->bind_param('i', $admin_id);
+                    $secretStmt->execute();
+                    $secretRow = $secretStmt->get_result()->fetch_assoc() ?: [];
+                    $secretStmt->close();
+                    $paystack_secret_key = trim(strval($secretRow['paystack_secret_key'] ?? ''));
+                }
+            }
+
+            $stmt = $conn->prepare("UPDATE admins
+                SET full_name = ?,
+                    class_name = ?,
+                    academic_level = ?,
+                    program_name = ?,
+                    department_id = NULLIF(?, 0),
+                    show_on_public_portal = ?,
+                    allow_super_admin_access = ?,
+                    momo_number = ?,
+                    account_number = ?,
+                    account_name = ?,
+                    bank_name = ?,
+                    momo_network = ?,
+                    payment_method = ?,
+                    paystack_enabled = ?,
+                    paystack_public_key = ?,
+                    paystack_secret_key = ?
+                WHERE admin_id = ? AND role = 'rep'");
+            $stmt->bind_param(
+                "ssssiiisssssisssi",
+                $full_name,
+                $class_name,
+                $academic_level,
+                $program_name,
+                $department_id,
+                $show_on_public_portal,
+                $allow_super_admin_access,
+                $momo_number,
+                $account_number,
+                $account_name,
+                $bank_name,
+                $momo_network,
+                $payment_method,
+                $paystack_enabled,
+                $paystack_public_key,
+                $paystack_secret_key,
+                $admin_id
+            );
             $stmt->execute();
+            if ($stmt->affected_rows > 0 && function_exists('book_system_bump_portal_lookup_cache_version')) {
+                book_system_bump_portal_lookup_cache_version($conn);
+            }
             if (!$allow_super_admin_access && intval($_SESSION['super_admin_rep_context_id'] ?? 0) === $admin_id) {
                 unset($_SESSION['super_admin_rep_context_id']);
             }
             $success_msg = "Rep details updated.";
+        } elseif ($action === 'update_rep') {
+            $error_msg = "Please select a valid department.";
         }
     } elseif ($action === 'toggle_subscription') {
         $admin_id = intval($_POST['admin_id'] ?? 0);
@@ -172,7 +306,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 // Fetch all reps
-$reps = $conn->query("SELECT * FROM admins WHERE role = 'rep' ORDER BY created_at DESC");
+$reps = $conn->query("SELECT a.*, d.department_name
+    FROM admins a
+    LEFT JOIN departments d ON d.department_id = a.department_id
+    WHERE a.role = 'rep'
+    ORDER BY a.created_at DESC");
 $rep_summary = [
     'total_reps' => 0,
     'active_reps' => 0,
@@ -490,7 +628,7 @@ if ($rep_summary_result) {
                 </div>
                 <div class="form-group">
                     <label>Class Name</label>
-                    <input type="text" name="class_name" class="form-input" placeholder="e.g. Level 200 CS">
+                    <input type="text" name="class_name" class="form-input" placeholder="e.g. ITE 3A">
                 </div>
                 <div class="form-group">
                     <label>Academic Level</label>
@@ -499,8 +637,18 @@ if ($rep_summary_result) {
             </div>
             <div class="form-row">
                 <div class="form-group">
-                    <label>Program Name</label>
-                    <input type="text" name="program_name" class="form-input" placeholder="e.g. Computer Science">
+                    <label>Department *</label>
+                    <select name="department_id" class="form-input" required>
+                        <option value="">Select department</option>
+                        <?php foreach ($departments as $department): ?>
+                            <?php $department_option = trim(strval($department['department_name'] ?? '')); ?>
+                            <?php $department_code = trim(strval($department['department_code'] ?? '')); ?>
+                            <?php if ($department_code !== '') { $department_option .= ' (' . $department_code . ')'; } ?>
+                            <option value="<?php echo intval($department['department_id']); ?>">
+                                <?php echo htmlspecialchars($department_option); ?>
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
                 </div>
                 <div class="form-group" style="display:flex; align-items:flex-end;">
                     <label style="display:flex; align-items:center; gap:10px; margin-bottom: 0;">
@@ -515,16 +663,41 @@ if ($rep_summary_result) {
                     </label>
                 </div>
                 <div class="form-group">
+                    <label>Payment Method</label>
+                    <select name="payment_method" class="form-input">
+                        <option value="manual_momo" selected>Manual MoMo</option>
+                        <option value="paystack">Paystack</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>MoMo Network</label>
+                    <input type="text" name="momo_network" class="form-input" placeholder="e.g. MTN, Telecel, AirtelTigo">
+                </div>
+                <div class="form-group">
                     <label>MoMo Number</label>
                     <input type="text" name="momo_number" class="form-input" placeholder="e.g. 0244123456">
                 </div>
                 <div class="form-group">
-                    <label>Bank Name</label>
-                    <input type="text" name="bank_name" class="form-input" placeholder="e.g. GCB Bank">
-                </div>
-                <div class="form-group">
                     <label>Account Name</label>
                     <input type="text" name="account_name" class="form-input" placeholder="e.g. John Doe">
+                </div>
+                <div class="form-group">
+                    <label>Paystack Public Key</label>
+                    <input type="text" name="paystack_public_key" class="form-input" placeholder="pk_test_...">
+                </div>
+                <div class="form-group">
+                    <label>Paystack Secret Key</label>
+                    <input type="password" name="paystack_secret_key" class="form-input" placeholder="sk_test_...">
+                </div>
+                <div class="form-group" style="display:flex; align-items:flex-end;">
+                    <label style="display:flex; align-items:center; gap:10px; margin-bottom: 0;">
+                        <input type="checkbox" name="paystack_enabled" value="1" style="width:auto;">
+                        Enable Paystack for this rep
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label>Bank Name</label>
+                    <input type="text" name="bank_name" class="form-input" placeholder="e.g. GCB Bank">
                 </div>
                 <div class="form-group">
                     <label>Account Number</label>
@@ -544,9 +717,9 @@ if ($rep_summary_result) {
                     <tr>
                         <th>Username</th>
                         <th>Full Name</th>
+                        <th>Department</th>
                         <th>Class</th>
                         <th>Level</th>
-                        <th>Program</th>
                         <th>Portal</th>
                         <th>Privacy</th>
                         <th>Status</th>
@@ -559,12 +732,12 @@ if ($rep_summary_result) {
                     <?php if ($reps && $reps->num_rows > 0): ?>
                         <?php while ($rep = $reps->fetch_assoc()): ?>
                         <tr>
-                            <?php $rep_access = function_exists('book_system_build_rep_access_status_from_row') ? book_system_build_rep_access_status_from_row($rep) : []; ?>
+                            <?php $rep_access = function_exists('book_system_get_rep_access_status') ? book_system_get_rep_access_status($conn, intval($rep['admin_id'] ?? 0)) : []; ?>
                             <td><strong><?php echo htmlspecialchars($rep['username']); ?></strong></td>
                             <td><?php echo htmlspecialchars($rep['full_name']); ?></td>
+                            <td><?php echo htmlspecialchars(strval($rep['department_name'] ?? $rep['program_name'] ?? '') !== '' ? strval($rep['department_name'] ?? $rep['program_name']) : '—'); ?></td>
                             <td><?php echo htmlspecialchars($rep['class_name'] ?: '—'); ?></td>
                             <td><?php echo htmlspecialchars($rep['academic_level'] ?: '—'); ?></td>
-                            <td><?php echo htmlspecialchars($rep['program_name'] ?: '—'); ?></td>
                             <td><?php echo !empty($rep['show_on_public_portal']) ? 'Visible' : 'Hidden'; ?></td>
                             <td><?php echo !empty($rep['allow_super_admin_access']) ? 'Shared' : 'Private'; ?></td>
                             <td>
@@ -573,7 +746,9 @@ if ($rep_summary_result) {
                                 </span>
                             </td>
                             <td>
-                                <?php if (!empty($rep_access['is_subscription_active'])): ?>
+                                <?php if (($rep_access['status_key'] ?? '') === 'free_mode'): ?>
+                                    <span class="status-badge" style="background:#e0f2fe; color:#0f4c81;">Free Access</span>
+                                <?php elseif (!empty($rep_access['is_subscription_active'])): ?>
                                     <span class="status-badge status-active">Subscribed</span>
                                 <?php elseif (!empty($rep_access['is_expired'])): ?>
                                     <span class="status-badge status-inactive">Trial Expired</span>
@@ -587,7 +762,7 @@ if ($rep_summary_result) {
                             <td>
                                 <div class="action-btns">
                                     <button type="button" class="btn btn-sm btn-warning" 
-                                            onclick="openEditModal(<?php echo $rep['admin_id']; ?>, '<?php echo htmlspecialchars($rep['full_name'], ENT_QUOTES); ?>', '<?php echo htmlspecialchars($rep['class_name'] ?? '', ENT_QUOTES); ?>', '<?php echo htmlspecialchars($rep['academic_level'] ?? '', ENT_QUOTES); ?>', '<?php echo htmlspecialchars($rep['program_name'] ?? '', ENT_QUOTES); ?>', <?php echo !empty($rep['show_on_public_portal']) ? 'true' : 'false'; ?>, <?php echo !empty($rep['allow_super_admin_access']) ? 'true' : 'false'; ?>, '<?php echo htmlspecialchars($rep['momo_number'] ?? '', ENT_QUOTES); ?>', '<?php echo htmlspecialchars($rep['bank_name'] ?? '', ENT_QUOTES); ?>', '<?php echo htmlspecialchars($rep['account_name'] ?? '', ENT_QUOTES); ?>', '<?php echo htmlspecialchars($rep['account_number'] ?? '', ENT_QUOTES); ?>')">
+                                            onclick="openEditModal(<?php echo $rep['admin_id']; ?>, '<?php echo htmlspecialchars($rep['full_name'], ENT_QUOTES); ?>', '<?php echo htmlspecialchars($rep['class_name'] ?? '', ENT_QUOTES); ?>', '<?php echo htmlspecialchars($rep['academic_level'] ?? '', ENT_QUOTES); ?>', '<?php echo intval($rep['department_id'] ?? 0); ?>', <?php echo !empty($rep['show_on_public_portal']) ? 'true' : 'false'; ?>, <?php echo !empty($rep['allow_super_admin_access']) ? 'true' : 'false'; ?>, '<?php echo htmlspecialchars($rep['momo_number'] ?? '', ENT_QUOTES); ?>', '<?php echo htmlspecialchars($rep['bank_name'] ?? '', ENT_QUOTES); ?>', '<?php echo htmlspecialchars($rep['account_name'] ?? '', ENT_QUOTES); ?>', '<?php echo htmlspecialchars($rep['account_number'] ?? '', ENT_QUOTES); ?>', '<?php echo htmlspecialchars($rep['payment_method'] ?? 'manual_momo', ENT_QUOTES); ?>', '<?php echo htmlspecialchars($rep['momo_network'] ?? '', ENT_QUOTES); ?>', <?php echo !empty($rep['paystack_enabled']) ? 'true' : 'false'; ?>, '<?php echo htmlspecialchars($rep['paystack_public_key'] ?? '', ENT_QUOTES); ?>')">
                                         &#9998; Edit
                                     </button>
                                     <button type="button" class="btn btn-sm btn-primary" 
@@ -621,6 +796,11 @@ if ($rep_summary_result) {
                                             <?php echo !empty($rep_access['is_subscription_active']) ? '&#9208; End Subscription' : '&#128176; Activate Subscription'; ?>
                                         </button>
                                     </form>
+                                    <?php if ($session_admin_role === 'super_admin'): ?>
+                                    <a href="reset_rep_semester_data.php?admin_id=<?php echo intval($rep['admin_id']); ?>" class="btn btn-sm btn-danger">
+                                        &#9851; Clear Semester Data
+                                    </a>
+                                    <?php endif; ?>
                                 </div>
                             </td>
                         </tr>
@@ -663,8 +843,18 @@ if ($rep_summary_result) {
                 <input type="text" name="academic_level" id="edit_academic_level" class="form-input" maxlength="3">
             </div>
             <div class="form-group">
-                <label>Program Name</label>
-                <input type="text" name="program_name" id="edit_program_name" class="form-input">
+                <label>Department *</label>
+                <select name="department_id" id="edit_department_id" class="form-input" required>
+                    <option value="">Select department</option>
+                    <?php foreach ($departments as $department): ?>
+                        <?php $department_option = trim(strval($department['department_name'] ?? '')); ?>
+                        <?php $department_code = trim(strval($department['department_code'] ?? '')); ?>
+                        <?php if ($department_code !== '') { $department_option .= ' (' . $department_code . ')'; } ?>
+                        <option value="<?php echo intval($department['department_id']); ?>">
+                            <?php echo htmlspecialchars($department_option); ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
             </div>
             <div class="form-group">
                 <label style="display:flex; align-items:center; gap:10px;">
@@ -681,16 +871,41 @@ if ($rep_summary_result) {
             <hr style="margin: 15px 0; border: none; border-top: 1px solid #eee;">
             <p style="font-weight: 600; color: #667eea; margin-bottom: 15px;">&#128179; Payment Details</p>
             <div class="form-group">
+                <label>Payment Method</label>
+                <select name="payment_method" id="edit_payment_method" class="form-input">
+                    <option value="manual_momo">Manual MoMo</option>
+                    <option value="paystack">Paystack</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>MoMo Network</label>
+                <input type="text" name="momo_network" id="edit_momo_network" class="form-input" placeholder="e.g. MTN, Telecel, AirtelTigo">
+            </div>
+            <div class="form-group">
                 <label>MoMo Number</label>
                 <input type="text" name="momo_number" id="edit_momo_number" class="form-input" placeholder="e.g. 0244123456">
             </div>
             <div class="form-group">
-                <label>Bank Name</label>
-                <input type="text" name="bank_name" id="edit_bank_name" class="form-input" placeholder="e.g. GCB Bank">
-            </div>
-            <div class="form-group">
                 <label>Account Name</label>
                 <input type="text" name="account_name" id="edit_account_name" class="form-input" placeholder="e.g. John Doe">
+            </div>
+            <div class="form-group">
+                <label>Paystack Public Key</label>
+                <input type="text" name="paystack_public_key" id="edit_paystack_public_key" class="form-input" placeholder="pk_test_...">
+            </div>
+            <div class="form-group">
+                <label>Paystack Secret Key</label>
+                <input type="password" name="paystack_secret_key" id="edit_paystack_secret_key" class="form-input" placeholder="Leave blank to keep the existing secret key">
+            </div>
+            <div class="form-group">
+                <label style="display:flex; align-items:center; gap:10px;">
+                    <input type="checkbox" name="paystack_enabled" id="edit_paystack_enabled" value="1" style="width:auto;">
+                    Enable Paystack for this rep
+                </label>
+            </div>
+            <div class="form-group">
+                <label>Bank Name</label>
+                <input type="text" name="bank_name" id="edit_bank_name" class="form-input" placeholder="e.g. GCB Bank">
             </div>
             <div class="form-group">
                 <label>Account Number</label>
@@ -721,18 +936,23 @@ if ($rep_summary_result) {
 </div>
 
 <script>
-function openEditModal(adminId, fullName, className, academicLevel, programName, showOnPortal, allowSuperAdminAccess, momoNumber, bankName, accountName, accountNumber) {
+function openEditModal(adminId, fullName, className, academicLevel, departmentId, showOnPortal, allowSuperAdminAccess, momoNumber, bankName, accountName, accountNumber, paymentMethod, momoNetwork, paystackEnabled, paystackPublicKey) {
     document.getElementById('edit_admin_id').value = adminId;
     document.getElementById('edit_full_name').value = fullName;
     document.getElementById('edit_class_name').value = className;
     document.getElementById('edit_academic_level').value = academicLevel || '';
-    document.getElementById('edit_program_name').value = programName || '';
+    document.getElementById('edit_department_id').value = departmentId || '';
     document.getElementById('edit_show_on_public_portal').checked = !!showOnPortal;
     document.getElementById('edit_allow_super_admin_access').checked = !!allowSuperAdminAccess;
+    document.getElementById('edit_payment_method').value = paymentMethod || 'manual_momo';
+    document.getElementById('edit_momo_network').value = momoNetwork || '';
     document.getElementById('edit_momo_number').value = momoNumber || '';
     document.getElementById('edit_bank_name').value = bankName || '';
     document.getElementById('edit_account_name').value = accountName || '';
     document.getElementById('edit_account_number').value = accountNumber || '';
+    document.getElementById('edit_paystack_enabled').checked = !!paystackEnabled;
+    document.getElementById('edit_paystack_public_key').value = paystackPublicKey || '';
+    document.getElementById('edit_paystack_secret_key').value = '';
     document.getElementById('editModal').classList.add('active');
 }
 

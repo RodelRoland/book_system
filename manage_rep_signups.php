@@ -5,22 +5,26 @@ require_once 'db.php';
 if (file_exists(__DIR__ . '/setup_tasks.php')) {
     require_once __DIR__ . '/setup_tasks.php';
     if (function_exists('book_system_setup_ensure_column')) {
+        book_system_setup_ensure_column($conn, 'rep_signup_requests', 'signup_password_hash', 'VARCHAR(255) NULL AFTER full_name');
         book_system_setup_ensure_column($conn, 'rep_signup_requests', 'public_display_name', 'VARCHAR(50) NULL AFTER full_name');
         book_system_setup_ensure_column($conn, 'rep_signup_requests', 'profile_photo_path', 'VARCHAR(255) NULL AFTER public_display_name');
+        book_system_setup_ensure_column($conn, 'rep_signup_requests', 'recovery_email', 'VARCHAR(120) NULL AFTER class_name');
+        book_system_setup_ensure_column($conn, 'rep_signup_requests', 'department_id', 'INT NULL AFTER class_name');
         book_system_setup_ensure_column($conn, 'admins', 'public_display_name', 'VARCHAR(50) NULL AFTER full_name');
         book_system_setup_ensure_column($conn, 'admins', 'profile_photo_path', 'VARCHAR(255) NULL AFTER public_display_name');
+        book_system_setup_ensure_column($conn, 'admins', 'recovery_email', 'VARCHAR(120) NULL AFTER account_number');
+        book_system_setup_ensure_column($conn, 'admins', 'department_id', 'INT NULL AFTER program_name');
     }
 }
 
-if (!isset($_SESSION['admin_logged_in']) || ($_SESSION['admin_role'] ?? '') !== 'super_admin') {
-    header('Location: admin.php');
-    exit;
-}
+book_system_require_admin_feature($conn, 'manage_rep_signups');
 
 $success_msg = '';
 $error_msg = '';
-$generated_code = null;
-$generated_username = null;
+$access_mode_config = function_exists('book_system_get_access_mode_config')
+    ? book_system_get_access_mode_config($conn)
+    : ['effective_mode' => 'premium_active'];
+$is_premium_signup_mode = strval($access_mode_config['effective_mode'] ?? 'premium_active') === 'premium_active';
 
 $current_admin_id = intval($_SESSION['admin_id'] ?? 0);
 
@@ -53,21 +57,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $public_display_name = substr(strval($req['public_display_name'] ?? ''), 0, 50);
                 $profile_photo_path = trim(strval($req['profile_photo_path'] ?? ''));
                 $class_name = substr(strval($req['class_name'] ?? ''), 0, 30);
+                $recovery_email = function_exists('book_system_normalize_recovery_email')
+                    ? book_system_normalize_recovery_email(strval($req['recovery_email'] ?? ''))
+                    : trim(strval($req['recovery_email'] ?? ''));
+                $department_id = intval($req['department_id'] ?? 0);
+                $department_name = '';
+                if ($department_id > 0) {
+                    $department_stmt = $conn->prepare("SELECT department_name FROM departments WHERE department_id = ? LIMIT 1");
+                    if ($department_stmt) {
+                        $department_stmt->bind_param('i', $department_id);
+                        $department_stmt->execute();
+                        $department_row = $department_stmt->get_result()->fetch_assoc();
+                        $department_name = trim(strval($department_row['department_name'] ?? ''));
+                        $department_stmt->close();
+                    }
+                }
+
+                $request_password_hash = trim(strval($req['signup_password_hash'] ?? ''));
 
                 $check = $conn->prepare("SELECT admin_id FROM admins WHERE username = ? LIMIT 1");
                 $check->bind_param('s', $username);
                 $check->execute();
                 if ($check->get_result()->num_rows > 0) {
                     $error_msg = 'Username already exists in admins. Cannot approve.';
+                } elseif ($request_password_hash === '') {
+                    $error_msg = 'This signup request was created under the old onboarding flow. Ask the rep to sign up again using the current signup page.';
+                } elseif ($recovery_email === '') {
+                    $error_msg = 'This signup request does not have a valid recovery email. Ask the rep to sign up again.';
                 } else {
-                    $tmp_pass = bin2hex(random_bytes(16));
-                    $tmp_hash = password_hash($tmp_pass, PASSWORD_DEFAULT);
-
-                    $code = strval(random_int(1000, 9999));
-                    $expires_at = date('Y-m-d H:i:s', time() + (24 * 3600));
-
-                    $ins = $conn->prepare("INSERT INTO admins (username, password_hash, full_name, public_display_name, profile_photo_path, class_name, role, is_active, first_time_code, first_time_code_expires, requires_password_reset, approved_at, trial_started_at, trial_expires_at, subscription_active) VALUES (?, ?, ?, ?, ?, ?, 'rep', 1, ?, ?, 1, NOW(), NOW(), DATE_ADD(CURDATE(), INTERVAL 7 DAY), 0)");
-                    $ins->bind_param('ssssssss', $username, $tmp_hash, $full_name, $public_display_name, $profile_photo_path, $class_name, $code, $expires_at);
+                    $trial_started_at = $is_premium_signup_mode ? date('Y-m-d H:i:s') : null;
+                    $trial_expires_at = $is_premium_signup_mode ? book_system_trial_expiry_from_start($trial_started_at) : null;
+                    $ins = $conn->prepare("INSERT INTO admins (username, password_hash, full_name, public_display_name, profile_photo_path, class_name, recovery_email, department_id, program_name, role, is_active, approved_at, trial_started_at, trial_expires_at, subscription_active) VALUES (?, ?, ?, ?, ?, ?, ?, NULLIF(?, 0), ?, 'rep', 1, NOW(), ?, ?, 0)");
+                    $ins->bind_param('sssssssisss', $username, $request_password_hash, $full_name, $public_display_name, $profile_photo_path, $class_name, $recovery_email, $department_id, $department_name, $trial_started_at, $trial_expires_at);
 
                     if ($ins->execute()) {
                         $new_admin_id = intval($conn->insert_id);
@@ -83,13 +104,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 'public_display_name' => $public_display_name,
                                 'profile_photo_path' => $profile_photo_path,
                                 'class_name' => $class_name,
+                                'recovery_email' => $recovery_email,
+                                'department_id' => $department_id,
+                                'department_name' => $department_name,
                                 'created_admin_id' => $new_admin_id,
+                                'activation_mode' => 'direct_password_activation',
                             ], $new_admin_id);
                         }
 
-                        $generated_code = $code;
-                        $generated_username = $username;
-                        $success_msg = "Payment confirmed. Rep account created. Share the 4-digit first-time code with the rep.";
+                        $success_msg = $is_premium_signup_mode
+                            ? "Payment verified. Rep account activated. The rep can now sign in with the password chosen during signup."
+                            : "Rep account approved. The rep can now sign in with the password chosen during signup.";
                     } else {
                         $error_msg = 'Failed to create rep account.';
                     }
@@ -105,6 +130,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             'public_display_name' => strval($req['public_display_name'] ?? ''),
                             'profile_photo_path' => strval($req['profile_photo_path'] ?? ''),
                             'class_name' => strval($req['class_name'] ?? ''),
+                            'recovery_email' => strval($req['recovery_email'] ?? ''),
+                            'department_id' => intval($req['department_id'] ?? 0),
                         ]);
                     }
                     $success_msg = 'Request rejected.';
@@ -117,8 +144,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-$pending = $conn->query("SELECT * FROM rep_signup_requests WHERE status = 'pending' ORDER BY created_at DESC");
-$recent = $conn->query("SELECT * FROM rep_signup_requests WHERE status <> 'pending' ORDER BY approved_at DESC, created_at DESC LIMIT 20");
+$pending = $conn->query("SELECT rsr.*, d.department_name
+    FROM rep_signup_requests rsr
+    LEFT JOIN departments d ON d.department_id = rsr.department_id
+    WHERE rsr.status = 'pending'
+    ORDER BY rsr.created_at DESC");
+$recent = $conn->query("SELECT rsr.*, d.department_name
+    FROM rep_signup_requests rsr
+    LEFT JOIN departments d ON d.department_id = rsr.department_id
+    WHERE rsr.status <> 'pending'
+    ORDER BY rsr.approved_at DESC, rsr.created_at DESC
+    LIMIT 20");
 $pending_count = $pending ? intval($pending->num_rows) : 0;
 $recent_count = $recent ? intval($recent->num_rows) : 0;
 $decision_stats = ['approved' => 0, 'rejected' => 0];
@@ -354,16 +390,6 @@ if ($decision_stats_result) {
         }
         .btn-approve { background: linear-gradient(135deg, #16a34a 0%, #0f9d76 100%); color: white; }
         .btn-reject { background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%); color: white; }
-        .code-box {
-            margin-top: 10px;
-            background: #f8fafc;
-            border: 1px solid var(--border-soft);
-            border-radius: 16px;
-            padding: 16px;
-            font-size: 14px;
-            line-height: 1.7;
-        }
-        .code-box strong { font-size: 18px; color: var(--text); }
         .section-title {
             font-size: 20px;
             font-weight: 800;
@@ -399,7 +425,7 @@ if ($decision_stats_result) {
     <div class="header">
         <div class="header-copy">
             <h1>Rep Signup Requests</h1>
-            <div class="subtitle">Review onboarding requests, confirm payment, and approve qualified reps so the system can generate their 4-digit first-time code.</div>
+            <div class="subtitle">Review onboarding requests, verify payment when required, and approve qualified reps so they can sign in directly with the password chosen during signup.</div>
         </div>
         <div class="header-actions">
             <a href="admin.php" class="back-btn">&larr; Back</a>
@@ -436,17 +462,6 @@ if ($decision_stats_result) {
         </div>
     </div>
 
-    <?php if ($generated_code && $generated_username): ?>
-        <div class="card">
-            <h3 class="section-title">First-Time Code Generated</h3>
-            <div class="code-box">
-                <div><strong>Username:</strong> <?php echo htmlspecialchars($generated_username); ?></div>
-                <div><strong>Code:</strong> <strong><?php echo htmlspecialchars($generated_code); ?></strong></div>
-                <div style="margin-top: 8px; color:#666;">Rep should visit: <strong>First-Time Code Reset</strong> (login page link) and set password.</div>
-            </div>
-        </div>
-    <?php endif; ?>
-
     <div class="card">
         <h3 class="section-title">Pending Requests</h3>
         <div class="table-shell">
@@ -456,6 +471,8 @@ if ($decision_stats_result) {
                     <th>Username</th>
                     <th>Full Name</th>
                     <th>Public Name</th>
+                    <th>Recovery Email</th>
+                    <th>Department</th>
                     <th>Class</th>
                     <th>Status</th>
                     <th>Requested</th>
@@ -469,12 +486,14 @@ if ($decision_stats_result) {
                             <td><strong><?php echo htmlspecialchars($r['username']); ?></strong></td>
                             <td><?php echo htmlspecialchars($r['full_name']); ?></td>
                             <td><?php echo htmlspecialchars(strval($r['public_display_name'] ?? '') !== '' ? strval($r['public_display_name']) : '—'); ?></td>
+                            <td><?php echo htmlspecialchars(strval($r['recovery_email'] ?? '') !== '' ? strval($r['recovery_email']) : '—'); ?></td>
+                            <td><?php echo htmlspecialchars(strval($r['department_name'] ?? '') !== '' ? strval($r['department_name']) : '—'); ?></td>
                             <td><?php echo htmlspecialchars($r['class_name'] ?: '—'); ?></td>
                             <td><span class="badge badge-pending">pending</span></td>
                             <td><?php echo htmlspecialchars($r['created_at']); ?></td>
                             <td>
                                 <div class="actions">
-                                    <form method="post" onsubmit="return confirm('Approve this request and generate first-time code?');">
+                                    <form method="post" onsubmit="return confirm('Approve this request and activate the rep account?');">
                                         <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
                                         <input type="hidden" name="action" value="approve">
                                         <input type="hidden" name="signup_id" value="<?php echo intval($r['signup_id']); ?>">
@@ -492,7 +511,7 @@ if ($decision_stats_result) {
                     <?php endwhile; ?>
                 <?php else: ?>
                     <tr>
-                        <td colspan="7" class="empty-cell">No pending requests.</td>
+                        <td colspan="8" class="empty-cell">No pending requests.</td>
                     </tr>
                 <?php endif; ?>
             </tbody>
@@ -509,6 +528,8 @@ if ($decision_stats_result) {
                     <th>Username</th>
                     <th>Full Name</th>
                     <th>Public Name</th>
+                    <th>Recovery Email</th>
+                    <th>Department</th>
                     <th>Class</th>
                     <th>Status</th>
                     <th>Approved/Rejected At</th>
@@ -521,6 +542,8 @@ if ($decision_stats_result) {
                             <td><strong><?php echo htmlspecialchars($r['username']); ?></strong></td>
                             <td><?php echo htmlspecialchars($r['full_name']); ?></td>
                             <td><?php echo htmlspecialchars(strval($r['public_display_name'] ?? '') !== '' ? strval($r['public_display_name']) : '—'); ?></td>
+                            <td><?php echo htmlspecialchars(strval($r['recovery_email'] ?? '') !== '' ? strval($r['recovery_email']) : '—'); ?></td>
+                            <td><?php echo htmlspecialchars(strval($r['department_name'] ?? '') !== '' ? strval($r['department_name']) : '—'); ?></td>
                             <td><?php echo htmlspecialchars($r['class_name'] ?: '—'); ?></td>
                             <td>
                                 <?php if ($r['status'] === 'approved'): ?>
@@ -534,7 +557,7 @@ if ($decision_stats_result) {
                     <?php endwhile; ?>
                 <?php else: ?>
                     <tr>
-                        <td colspan="6" class="empty-cell">No decisions yet.</td>
+                        <td colspan="7" class="empty-cell">No decisions yet.</td>
                     </tr>
                 <?php endif; ?>
             </tbody>

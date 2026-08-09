@@ -79,7 +79,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Lecturer Login</title>
     <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
         body, html { height: 100%; }
 
         .login-wrapper {
@@ -149,6 +149,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             border-color: #111827;
             background: white;
         }
+        .password-field {
+            position: relative;
+        }
+        .password-field input {
+            padding-right: 100px;
+        }
+        .password-toggle {
+            position: absolute;
+            top: 50%;
+            right: 12px;
+            transform: translateY(-50%);
+            border: none;
+            background: transparent;
+            color: #111827;
+            font-size: 13px;
+            font-weight: 700;
+            cursor: pointer;
+            padding: 6px 8px;
+            border-radius: 8px;
+        }
+        .password-toggle:hover {
+            background: rgba(17, 24, 39, 0.08);
+        }
 
         .login-btn {
             width: 100%;
@@ -186,6 +209,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             text-decoration: none;
             font-weight: 700;
         }
+        .footer-links {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-top: 10px;
+        }
     </style>
 </head>
 <body>
@@ -218,7 +248,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             <div class="form-group">
                 <label>Password</label>
-                <input type="password" name="password" required autocomplete="current-password">
+                <div class="password-field">
+                    <input type="password" name="password" required autocomplete="current-password" data-password-input>
+                    <button type="button" class="password-toggle" data-password-toggle>Show</button>
+                </div>
             </div>
 
             <button type="submit" class="login-btn">Sign In</button>
@@ -228,12 +261,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <div style="margin-bottom: 8px;">
                 <a href="lecturer_signup.php">Create Lecturer Account</a>
             </div>
-            <a href="login.php">Admin Login</a>
+            <div class="footer-links">
+                <a href="common_request_portal.php">Portal</a>
+                <a href="login.php">Admin Login</a>
+                <?php if (!empty($error)): ?>
+                    <span style="color:#d1d5db;">|</span>
+                    <a href="forgot_password.php?account_type=lecturer">Forgot Password</a>
+                <?php endif; ?>
+            </div>
         </div>
     </div>
 </div>
 
 <?php include 'footer.php'; ?>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    document.querySelectorAll('[data-password-toggle]').forEach(function(toggleBtn) {
+        toggleBtn.addEventListener('click', function() {
+            var wrapper = toggleBtn.closest('.password-field');
+            var passwordInput = wrapper ? wrapper.querySelector('[data-password-input]') : null;
+            if (!passwordInput) {
+                return;
+            }
+            var showing = passwordInput.type === 'text';
+            passwordInput.type = showing ? 'password' : 'text';
+            toggleBtn.textContent = showing ? 'Show' : 'Hide';
+        });
+    });
+});
+</script>
 
 </body>
 </html>

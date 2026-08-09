@@ -5,10 +5,15 @@ require_once 'db.php';
 if (file_exists(__DIR__ . '/setup_tasks.php')) {
     require_once __DIR__ . '/setup_tasks.php';
     if (function_exists('book_system_setup_ensure_column')) {
+        book_system_setup_ensure_column($conn, 'rep_signup_requests', 'signup_password_hash', 'VARCHAR(255) NULL AFTER full_name');
         book_system_setup_ensure_column($conn, 'rep_signup_requests', 'public_display_name', 'VARCHAR(50) NULL AFTER full_name');
         book_system_setup_ensure_column($conn, 'rep_signup_requests', 'profile_photo_path', 'VARCHAR(255) NULL AFTER public_display_name');
+        book_system_setup_ensure_column($conn, 'rep_signup_requests', 'recovery_email', 'VARCHAR(120) NULL AFTER class_name');
+        book_system_setup_ensure_column($conn, 'rep_signup_requests', 'department_id', 'INT NULL AFTER class_name');
         book_system_setup_ensure_column($conn, 'admins', 'public_display_name', 'VARCHAR(50) NULL AFTER full_name');
         book_system_setup_ensure_column($conn, 'admins', 'profile_photo_path', 'VARCHAR(255) NULL AFTER public_display_name');
+        book_system_setup_ensure_column($conn, 'admins', 'recovery_email', 'VARCHAR(120) NULL AFTER account_number');
+        book_system_setup_ensure_column($conn, 'admins', 'department_id', 'INT NULL AFTER program_name');
     }
 }
 
@@ -27,11 +32,29 @@ $pay_to_full_name = $super_admin ? (strval($super_admin['full_name'] ?? '') !== 
 $pay_to_momo_number = $super_admin ? (strval($super_admin['momo_number'] ?? '') !== '' ? $super_admin['momo_number'] : $fallback_momo_number) : $fallback_momo_number;
 $pay_to_account_name = $super_admin ? (strval($super_admin['account_name'] ?? '') !== '' ? $super_admin['account_name'] : $fallback_account_name) : $fallback_account_name;
 
+$access_mode_config = function_exists('book_system_get_access_mode_config')
+    ? book_system_get_access_mode_config($conn)
+    : ['effective_mode' => 'premium_active'];
+$is_premium_signup_mode = strval($access_mode_config['effective_mode'] ?? 'premium_active') === 'premium_active';
+
+$departments = [];
+$department_query = $conn->query("SELECT department_id, department_name, department_code
+    FROM departments
+    WHERE is_active = 1
+    ORDER BY department_name ASC");
+if ($department_query) {
+    while ($department_row = $department_query->fetch_assoc()) {
+        $departments[] = $department_row;
+    }
+}
+
 $csrf_token = csrf_get_token();
 $form_username = trim($_POST['username'] ?? '');
 $form_full_name = trim($_POST['full_name'] ?? '');
 $form_public_display_name = trim($_POST['public_display_name'] ?? '');
 $form_class_name = trim($_POST['class_name'] ?? '');
+$form_recovery_email = trim($_POST['recovery_email'] ?? '');
+$form_department_id = intval($_POST['department_id'] ?? 0);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!csrf_validate($_POST['csrf_token'] ?? null)) {
@@ -41,9 +64,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $full_name = substr(trim($_POST['full_name'] ?? ''), 0, 30);
         $public_display_name = substr(trim($_POST['public_display_name'] ?? ''), 0, 50);
         $class_name = substr(trim($_POST['class_name'] ?? ''), 0, 30);
+        $recovery_email = function_exists('book_system_normalize_recovery_email')
+            ? book_system_normalize_recovery_email($_POST['recovery_email'] ?? '')
+            : trim(strval($_POST['recovery_email'] ?? ''));
+        $department_id = intval($_POST['department_id'] ?? 0);
+        $password = $_POST['password'] ?? '';
+        $confirm_password = $_POST['confirm_password'] ?? '';
+        $department_exists = false;
+        if ($department_id > 0) {
+            $department_stmt = $conn->prepare("SELECT department_id FROM departments WHERE department_id = ? AND is_active = 1 LIMIT 1");
+            if ($department_stmt) {
+                $department_stmt->bind_param('i', $department_id);
+                $department_stmt->execute();
+                $department_exists = $department_stmt->get_result()->num_rows === 1;
+                $department_stmt->close();
+            }
+        }
 
         if ($username === '' || $full_name === '') {
             $error_msg = 'Username and full name are required.';
+        } elseif ($recovery_email === '') {
+            $error_msg = 'A valid recovery email is required.';
+        } elseif ($password === '' || $confirm_password === '') {
+            $error_msg = 'Password and confirmation are required.';
+        } elseif (strlen($password) < 6) {
+            $error_msg = 'Password must be at least 6 characters.';
+        } elseif ($password !== $confirm_password) {
+            $error_msg = 'Password confirmation does not match.';
+        } elseif ($department_id <= 0 || !$department_exists) {
+            $error_msg = 'Please select your department.';
         } elseif (!isset($_FILES['profile_photo']) || intval($_FILES['profile_photo']['error'] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_NO_FILE) {
             $error_msg = 'A profile picture is required.';
         } else {
@@ -70,10 +119,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $error_msg = strval($upload_result['message'] ?? 'Could not upload the profile picture.');
                 } else {
                     $profile_photo_path = strval($upload_result['path'] ?? '');
-                    $stmt = $conn->prepare("INSERT INTO rep_signup_requests (username, full_name, public_display_name, profile_photo_path, class_name, status) VALUES (?, ?, ?, ?, ?, 'pending')");
-                    $stmt->bind_param('sssss', $username, $full_name, $public_display_name, $profile_photo_path, $class_name);
+                    $signup_password_hash = password_hash($password, PASSWORD_DEFAULT);
+                    $stmt = $conn->prepare("INSERT INTO rep_signup_requests (username, full_name, signup_password_hash, public_display_name, profile_photo_path, class_name, recovery_email, department_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, NULLIF(?, 0), 'pending')");
+                    $stmt->bind_param('sssssssi', $username, $full_name, $signup_password_hash, $public_display_name, $profile_photo_path, $class_name, $recovery_email, $department_id);
                     if ($stmt->execute()) {
-                        $success_msg = "Signup request submitted successfully. Please make payment to the super admin and wait for approval.";
+                        $newSignupId = intval($conn->insert_id);
+                        if (function_exists('book_system_notify_super_admins')) {
+                            $departmentLabel = '';
+                            foreach ($departments as $departmentOption) {
+                                if (intval($departmentOption['department_id'] ?? 0) === $department_id) {
+                                    $departmentLabel = trim(strval($departmentOption['department_name'] ?? ''));
+                                    break;
+                                }
+                            }
+                            $signupTitle = 'New rep signup request';
+                            $signupMessage = $full_name . ' signed up as a rep';
+                            if ($class_name !== '') {
+                                $signupMessage .= ' for ' . $class_name;
+                            }
+                            if ($departmentLabel !== '') {
+                                $signupMessage .= ' in ' . $departmentLabel;
+                            }
+                            $signupMessage .= '.';
+                            book_system_notify_super_admins($conn, 'rep_signup', $signupTitle, $signupMessage, $newSignupId);
+                        }
+                        $success_msg = $is_premium_signup_mode
+                            ? "Signup request submitted successfully. You will be approved once the admin verifies your payment."
+                            : "Signup request submitted successfully. Please wait for approval from the super admin.";
                     } else {
                         if ($profile_photo_path !== '' && function_exists('book_system_delete_profile_photo')) {
                             book_system_delete_profile_photo($profile_photo_path);
@@ -256,7 +328,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             font-size: 13px;
             letter-spacing: 0.01em;
         }
-        input {
+        input, select {
             width: 100%;
             padding: 14px 15px;
             border: 1px solid #dbe3ef;
@@ -266,7 +338,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             color: var(--text);
             transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
         }
-        input:focus {
+        input:focus, select:focus {
             outline: none;
             border-color: #7c8ef2;
             background: white;
@@ -491,7 +563,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <div class="header-copy">
             <div class="eyebrow">Rep Enrollment</div>
             <h1>Join the platform as a class rep.</h1>
-            <p class="subtitle">Send your signup request, complete the onboarding payment, and wait for approval so you can set your password and start using the system.</p>
+            <p class="subtitle"><?php echo $is_premium_signup_mode
+                ? 'Create your account details, complete your payment, and wait for approval. Once payment is verified, you can sign in directly with your password.'
+                : 'Create your account details and wait for approval. Once approved, you can sign in directly with your password.'; ?></p>
         </div>
         <a href="login.php" class="back-btn">&larr; Back</a>
     </div>
@@ -503,11 +577,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <div class="alert alert-error"><?php echo htmlspecialchars($error_msg); ?></div>
     <?php endif; ?>
 
-    <div class="shell">
+    <div class="shell" style="<?php echo $is_premium_signup_mode ? '' : 'grid-template-columns: 1fr;'; ?>">
         <div class="panel main-panel">
             <div class="panel-kicker">Sign Up Form</div>
             <h2 class="panel-title">Create your rep request</h2>
-            <p class="panel-copy">Use a clear username and your full name exactly as you want it to appear on the system. Once approved, the same username will be used for your first login and password setup.</p>
+            <p class="panel-copy">Use a clear username, your real full name, and a password you will remember. Once approved, you will sign in directly with the same username and password.</p>
 
             <div class="form-grid">
                 <form method="post" enctype="multipart/form-data" autocomplete="off">
@@ -528,7 +602,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     <div class="form-group">
                         <label>Full Name *</label>
                         <input type="text" name="full_name" required placeholder="e.g. Roland Kitsi" value="<?php echo htmlspecialchars($form_full_name); ?>">
-                        <div class="input-note">Use your real full name for approval and payment confirmation.</div>
+                        <div class="input-note"><?php echo $is_premium_signup_mode
+                            ? 'Use your real full name for approval and payment confirmation.'
+                            : 'Use your real full name for approval and account records.'; ?></div>
                     </div>
                     <div class="form-row">
                         <div class="form-group">
@@ -537,79 +613,91 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             <div class="input-note">This should be easy to remember and unique to you.</div>
                         </div>
                         <div class="form-group">
+                            <label>Department *</label>
+                            <select name="department_id" required>
+                                <option value="">Select your department</option>
+                                <?php foreach ($departments as $department): ?>
+                                    <?php $option_label = trim(strval($department['department_name'] ?? '')); ?>
+                                    <?php $option_code = trim(strval($department['department_code'] ?? '')); ?>
+                                    <?php if ($option_code !== '') { $option_label .= ' (' . $option_code . ')'; } ?>
+                                    <option value="<?php echo intval($department['department_id']); ?>" <?php echo $form_department_id === intval($department['department_id']) ? 'selected' : ''; ?>>
+                                        <?php echo htmlspecialchars($option_label); ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
+                            <div class="input-note">Choose the department your class belongs to.</div>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
                             <label>Class Name</label>
                             <input type="text" name="class_name" placeholder="e.g. ITE 3A" value="<?php echo htmlspecialchars($form_class_name); ?>">
                             <div class="input-note">Enter the class you will be managing on the platform.</div>
                         </div>
+                        <div class="form-group">
+                            <label>Name for Common Request Page</label>
+                            <input type="text" name="public_display_name" placeholder="e.g. Roland Kitsi" value="<?php echo htmlspecialchars($form_public_display_name); ?>">
+                            <div class="input-note">Optional. This is the name students will see on the common request page. Leave it blank to use your full name.</div>
+                        </div>
                     </div>
                     <div class="form-group">
-                        <label>Name for Common Request Page</label>
-                        <input type="text" name="public_display_name" placeholder="e.g. Roland Kitsi" value="<?php echo htmlspecialchars($form_public_display_name); ?>">
-                        <div class="input-note">Optional. This is the name students will see on the common request page. Leave it blank to use your full name.</div>
+                        <label>Recovery Email *</label>
+                        <input type="email" name="recovery_email" required placeholder="e.g. roland@example.com" value="<?php echo htmlspecialchars($form_recovery_email); ?>" autocomplete="email">
+                        <div class="input-note">This will be used to send your password reset code if you ever forget your password.</div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Password *</label>
+                            <input type="password" name="password" required minlength="6" placeholder="Create a password" autocomplete="new-password">
+                            <div class="input-note">Choose the password you will use once your request is approved.</div>
+                        </div>
+                        <div class="form-group">
+                            <label>Confirm Password *</label>
+                            <input type="password" name="confirm_password" required minlength="6" placeholder="Confirm your password" autocomplete="new-password">
+                            <div class="input-note">Re-enter the same password to avoid login mistakes later.</div>
+                        </div>
                     </div>
                     <div class="submit-wrap">
                         <button type="submit" class="btn">Submit Signup Request</button>
-                        <div class="trust-text">After payment is confirmed, the super admin will approve your request and issue your 4-digit first-time code.</div>
+                        <div class="trust-text"><?php echo $is_premium_signup_mode
+                            ? 'Once the admin verifies your payment, your request will be approved and you can sign in immediately with your chosen password.'
+                            : 'Once your request is approved, you can sign in immediately with your chosen password.'; ?></div>
                     </div>
                 </form>
             </div>
 
             <div class="quick-links">
-                <div class="trust-text">Already approved? Move straight to password setup using your first-time code.</div>
-                <a class="primary-link" href="rep_first_time_reset.php">Go to First-Time Code Reset &rarr;</a>
+                <div class="trust-text">Already approved? Go straight to the login page and sign in with your username and password.</div>
+                <a class="primary-link" href="login.php">Go to Login &rarr;</a>
             </div>
         </div>
 
-        <div class="panel side-panel">
-            <div class="stack">
-                <div class="side-card">
-                    <h3>Onboarding steps</h3>
-                    <div class="side-copy">The process is short. Complete each step once and you will be ready to access your rep workspace.</div>
-                    <div class="steps">
-                        <div class="step">
-                            <div class="num">1</div>
-                            <div>
-                                <div class="title">Submit your request</div>
-                                <div class="desc">Send your username, full name, and class details from this page.</div>
+        <?php if ($is_premium_signup_mode): ?>
+            <div class="panel side-panel">
+                <div class="stack">
+                    <div class="side-card">
+                        <div class="payment-card" style="margin-top: 0;">
+                            <h3 style="margin-bottom: 8px;">Payment details</h3>
+                            <div class="side-copy" style="margin-bottom: 14px;">Use these MoMo details for your onboarding payment. Keep your payment simple and consistent with your signup information.</div>
+                            <div class="pay-row">
+                                <div class="label">Account Name</div>
+                                <div class="value"><?php echo htmlspecialchars($pay_to_account_name); ?></div>
                             </div>
-                        </div>
-                        <div class="step">
-                            <div class="num">2</div>
-                            <div>
-                                <div class="title">Complete payment</div>
-                                <div class="desc">Pay to the MoMo account shown here and use your username as the payment reference if needed.</div>
+                            <div class="pay-row">
+                                <div class="label">MoMo Number</div>
+                                <div class="value" id="momoNumber"><?php echo htmlspecialchars($pay_to_momo_number); ?></div>
                             </div>
-                        </div>
-                        <div class="step">
-                            <div class="num">3</div>
-                            <div>
-                                <div class="title">Wait for approval</div>
-                                <div class="desc">Once payment is confirmed, you receive your 4-digit code and can set your password.</div>
+                            <div class="pay-row" style="margin-bottom: 0;">
+                                <div class="label">Reference</div>
+                                <div class="value">Use your username</div>
                             </div>
+                            <button type="button" class="copy-btn" onclick="copyMomo()">Copy MoMo Number</button>
+                            <div class="micro-note">Once your payment is confirmed, your request can be approved and your account can be activated.</div>
                         </div>
-                    </div>
-
-                    <div class="payment-card">
-                        <h3 style="margin-bottom: 8px;">Payment details</h3>
-                        <div class="side-copy" style="margin-bottom: 14px;">Use these MoMo details for your onboarding payment. Keep your payment simple and consistent with your signup information.</div>
-                        <div class="pay-row">
-                            <div class="label">Account Name</div>
-                            <div class="value"><?php echo htmlspecialchars($pay_to_account_name); ?></div>
-                        </div>
-                        <div class="pay-row">
-                            <div class="label">MoMo Number</div>
-                            <div class="value" id="momoNumber"><?php echo htmlspecialchars($pay_to_momo_number); ?></div>
-                        </div>
-                        <div class="pay-row" style="margin-bottom: 0;">
-                            <div class="label">Reference</div>
-                            <div class="value">Use your username</div>
-                        </div>
-                        <button type="button" class="copy-btn" onclick="copyMomo()">Copy MoMo Number</button>
-                        <div class="micro-note">Once your payment is confirmed, your request can be approved and your first-time code can be issued.</div>
                     </div>
                 </div>
             </div>
-        </div>
+        <?php endif; ?>
     </div>
 </div>
 

@@ -281,6 +281,12 @@ if (file_exists(__DIR__ . '/app_helpers.php')) {
     if (function_exists('book_system_ensure_balance_carry_forward_table')) {
         book_system_ensure_balance_carry_forward_table($conn);
     }
+    if (function_exists('book_system_ensure_notifications_table')) {
+        book_system_ensure_notifications_table($conn);
+    }
+    if (function_exists('book_system_ensure_rep_usage_daily_table')) {
+        book_system_ensure_rep_usage_daily_table($conn);
+    }
 }
 
 if (file_exists(__DIR__ . '/cache_helper.php')) {
@@ -300,6 +306,18 @@ $ACTIVE_SEMESTER_LABEL = function_exists('book_system_build_semester_label')
     ? book_system_build_semester_label($ACTIVE_SEMESTER_NAME, $ACTIVE_SEMESTER_START_DATE)
     : $ACTIVE_SEMESTER_NAME;
 
+if (function_exists('book_system_enforce_temporary_admin_access')) {
+    book_system_enforce_temporary_admin_access($conn);
+}
+
+if (function_exists('book_system_enforce_rep_activation_access')) {
+    book_system_enforce_rep_activation_access($conn);
+}
+
 if (function_exists('book_system_enforce_rep_subscription_access')) {
     book_system_enforce_rep_subscription_access($conn);
+}
+
+if (!defined('BOOK_SYSTEM_SKIP_USAGE_TRACKING') && function_exists('book_system_track_current_rep_usage')) {
+    book_system_track_current_rep_usage($conn);
 }

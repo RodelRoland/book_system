@@ -17,7 +17,10 @@ if (isset($_GET['index'])) {
     $index = trim(strval($_GET['index'] ?? ''));
     $rep_id = isset($_GET['rep_id']) ? intval($_GET['rep_id']) : 0;
 
-    $current_admin_id = intval($_SESSION['admin_id'] ?? 0);
+    $access_context = function_exists('book_system_get_effective_rep_access_context')
+        ? book_system_get_effective_rep_access_context($conn)
+        : null;
+    $current_admin_id = intval($access_context['effective_admin_id'] ?? ($_SESSION['admin_id'] ?? 0));
     $current_admin_role = $_SESSION['admin_role'] ?? 'rep';
     $is_super_admin = (($current_admin_role ?? '') === 'super_admin');
 
@@ -32,19 +35,27 @@ if (isset($_GET['index'])) {
         exit;
     }
 
-    // Only accept exact index numbers to prevent enumeration.
-    if (!preg_match('/^\d{10}$/', $index)) {
+    $normalized_index = function_exists('book_system_normalize_index_number')
+        ? book_system_normalize_index_number($index)
+        : strtoupper(preg_replace('/[^A-Z0-9]+/', '', $index));
+
+    // Only accept exact normalized 10-character index numbers to prevent enumeration.
+    if (!preg_match('/^[A-Z0-9]{10}$/', $normalized_index)) {
         echo json_encode([]);
         exit;
     }
+
+    $student_index_expr = function_exists('book_system_normalized_index_sql')
+        ? book_system_normalized_index_sql('s.index_number')
+        : "REPLACE(REPLACE(REPLACE(REPLACE(UPPER(TRIM(s.index_number)), '/', ''), ' ', ''), '-', ''), '.', '')";
     
     // Find all Book IDs already requested by this student in the current semester
     $sql = "
-        SELECT ri.book_id 
+        SELECT DISTINCT ri.book_id 
         FROM request_items ri
         JOIN requests r ON ri.request_id = r.request_id
         JOIN students s ON r.student_id = s.student_id
-        WHERE s.index_number = ? AND r.semester_id = ?
+        WHERE $student_index_expr = ? AND r.semester_id = ?
           AND COALESCE(ri.is_cancelled, 0) = 0
     ";
 
@@ -59,9 +70,9 @@ if (isset($_GET['index'])) {
     }
 
     if ($is_super_admin) {
-        $stmt->bind_param("si", $index, $semester_id);
+        $stmt->bind_param("si", $normalized_index, $semester_id);
     } else {
-        $stmt->bind_param("sii", $index, $semester_id, $rep_id);
+        $stmt->bind_param("sii", $normalized_index, $semester_id, $rep_id);
     }
     $stmt->execute();
     $result = $stmt->get_result();

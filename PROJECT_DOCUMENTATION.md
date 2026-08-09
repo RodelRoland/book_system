@@ -281,9 +281,6 @@ erDiagram
         string bank_name
         string account_name
         string account_number
-        string first_time_code
-        datetime first_time_code_expires
-        boolean requires_password_reset
         datetime approved_at
         datetime created_at
     }
@@ -566,7 +563,6 @@ book_distribution_system/
 │   ├── my_profile.php          # User profile management
 │   ├── rep_signup.php          # Representative registration
 │   ├── lecturer_signup.php    # Lecturer registration
-│   ├── rep_first_time_reset.php # First-time password reset
 │   └── generate_access_code.php # Access code generation
 └── 
 └── system/

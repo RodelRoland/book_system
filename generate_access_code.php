@@ -17,7 +17,7 @@ $access_context = function_exists('book_system_get_effective_rep_access_context'
     ? book_system_get_effective_rep_access_context($conn)
     : null;
 
-if (!$access_context || !empty($access_context['is_workspace_mode'])) {
+if (!$access_context || !empty($access_context['is_workspace_mode']) || !empty($access_context['is_own_rep_mode'])) {
     header('Location: rep_dashboard.php');
     exit;
 }

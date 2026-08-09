@@ -143,12 +143,13 @@ function is_using_redis() {
 /**
  * Get books list with caching (used on multiple pages)
  */
-function get_cached_books($conn, $available_only = true, $admin_id = null, $include_legacy_unassigned = true) {
+function get_cached_books($conn, $available_only = true, $admin_id = null, $include_legacy_unassigned = true, $semester_id = null) {
     $cache_key = 'books_list_' . ($available_only ? 'available' : 'all')
         . '_admin_' . ($admin_id === null ? 'all' : intval($admin_id))
-        . '_legacy_' . ($include_legacy_unassigned ? 'yes' : 'no');
+        . '_legacy_' . ($include_legacy_unassigned ? 'yes' : 'no')
+        . '_semester_' . ($semester_id === null ? 'all' : intval($semester_id));
 
-    return cache_get($cache_key, 300, function() use ($conn, $available_only, $admin_id, $include_legacy_unassigned) {
+    return cache_get($cache_key, 300, function() use ($conn, $available_only, $admin_id, $include_legacy_unassigned, $semester_id) {
         $sql = "SELECT book_id, book_title, price, availability FROM books";
         $conditions = [];
         $types = '';
@@ -162,6 +163,12 @@ function get_cached_books($conn, $available_only = true, $admin_id = null, $incl
             $conditions[] = $include_legacy_unassigned ? "(admin_id = ? OR admin_id IS NULL)" : "admin_id = ?";
             $types .= 'i';
             $params[] = intval($admin_id);
+        }
+
+        if ($semester_id !== null) {
+            $conditions[] = "semester_id = ?";
+            $types .= 'i';
+            $params[] = intval($semester_id);
         }
 
         if (!empty($conditions)) {
@@ -205,6 +212,10 @@ function clear_books_cache() {
     cache_clear_all();
 }
 
+if (isset($conn) && $conn instanceof mysqli && function_exists('book_system_apply_scheduled_book_prices')) {
+    book_system_apply_scheduled_book_prices($conn);
+}
+
 /**
  * Ensure database indexes exist for better performance
  */
@@ -229,7 +240,10 @@ function ensure_db_indexes($conn) {
         "CREATE INDEX idx_lecturer_payments_sem_admin_book ON lecturer_payments(semester_id, admin_id, book_id)",
         "CREATE INDEX idx_books_received_sem_admin_book ON books_received(semester_id, admin_id, book_id)",
         "CREATE INDEX idx_class_students_admin ON class_students(admin_id)",
-        "CREATE INDEX idx_class_students_index ON class_students(index_number)"
+        "CREATE INDEX idx_class_students_index ON class_students(index_number)",
+        "CREATE INDEX idx_class_students_admin_semester ON class_students(admin_id, semester_id)",
+        "CREATE INDEX idx_class_students_semester_normalized ON class_students(semester_id, normalized_index_number)",
+        "CREATE INDEX idx_books_semester_admin ON books(semester_id, admin_id)"
     ];
     
     foreach ($indexes as $sql) {

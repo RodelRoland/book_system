@@ -1,0 +1,17 @@
+{
+  "name": "ClassBookHub",
+  "short_name": "ClassBookHub",
+  "start_url": "common_request_portal.php",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f3f7fd",
+  "theme_color": "#2563eb",
+  "icons": [
+    {
+      "src": "assets/images/logo/classbookhub-icon.png",
+      "sizes": "1254x1254",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

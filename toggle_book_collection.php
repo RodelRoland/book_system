@@ -1,11 +1,18 @@
 ﻿<?php
 require_once __DIR__ . '/security_bootstrap.php';
 book_system_secure_session_start();
+$is_ajax = isset($_POST['ajax']) || isset($_GET['ajax']) || (strtolower(strval($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '')) === 'xmlhttprequest');
+
+function toggle_book_json_response(array $payload): void
+{
+    header('Content-Type: application/json');
+    echo json_encode($payload);
+    exit;
+}
+
 if (!isset($_SESSION['admin_logged_in'])) {
-    if (isset($_GET['ajax'])) {
-        header('Content-Type: application/json');
-        echo json_encode(['success' => false, 'error' => 'Not logged in']);
-        exit;
+    if ($is_ajax) {
+        toggle_book_json_response(['success' => false, 'message' => 'Your session has expired. Please sign in again.']);
     }
     header('Location: admin.php');
     exit;
@@ -37,10 +44,8 @@ $is_super_admin = false;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['item_id'])) {
     if (!csrf_validate($_POST['csrf_token'] ?? null)) {
-        if (isset($_POST['ajax'])) {
-            header('Content-Type: application/json');
-            echo json_encode(['success' => false, 'error' => 'CSRF invalid']);
-            exit;
+        if ($is_ajax) {
+            toggle_book_json_response(['success' => false, 'message' => 'Security check failed. Please refresh and try again.']);
         }
         header("Location: view_request.php?msg=csrf_invalid");
         exit;
@@ -48,113 +53,139 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['item_id'])) {
     $item_id = intval($_POST['item_id'] ?? 0);
 
     if ($item_id <= 0) {
-        if (isset($_POST['ajax'])) {
-            header('Content-Type: application/json');
-            echo json_encode(['success' => false, 'error' => 'Invalid item']);
-            exit;
+        if ($is_ajax) {
+            toggle_book_json_response(['success' => false, 'message' => 'Invalid book item selected.']);
         }
         header("Location: view_request.php?msg=invalid_item");
         exit;
     }
 
-    // Get current status first to determine if we're collecting or uncollecting
-    if ($is_super_admin) {
-        $current_stmt = $conn->prepare("SELECT is_collected, COALESCE(is_cancelled, 0) AS is_cancelled FROM request_items WHERE item_id = ?");
-    } else {
-        $current_stmt = $conn->prepare("SELECT ri.is_collected, COALESCE(ri.is_cancelled, 0) AS is_cancelled FROM request_items ri JOIN requests r ON r.request_id = ri.request_id WHERE ri.item_id = ? AND r.admin_id = ?");
-    }
-    
     $current_status = 0;
     $is_cancelled = 0;
-    if ($current_stmt) {
-        if ($is_super_admin) {
-            $current_stmt->bind_param('i', $item_id);
-        } else {
-            $current_stmt->bind_param('ii', $item_id, $current_admin_id);
-        }
-        $current_stmt->execute();
-        $current_result = $current_stmt->get_result();
-        if ($current_result && $current_result->num_rows === 1) {
-            $current_row = $current_result->fetch_assoc();
-            $current_status = intval($current_row['is_collected'] ?? 0);
-            $is_cancelled = intval($current_row['is_cancelled'] ?? 0);
-        }
-    }
+    $book_id = 0;
+    $request_semester_id = 0;
+    $request_admin_id = 0;
+    $new_status = 0;
+    $stock_remaining = null;
+    $requested_state_raw = trim(strval($_POST['desired_state'] ?? ''));
 
-    if ($is_cancelled === 1) {
-        if (isset($_POST['ajax'])) {
-            header('Content-Type: application/json');
-            echo json_encode(['success' => false, 'error' => 'Cancelled items cannot be collected']);
+    mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
+    try {
+        $conn->begin_transaction();
+
+        if ($is_super_admin) {
+            $current_stmt = $conn->prepare("SELECT
+                    ri.is_collected,
+                    COALESCE(ri.is_cancelled, 0) AS is_cancelled,
+                    ri.book_id,
+                    r.semester_id,
+                    r.admin_id
+                FROM request_items ri
+                JOIN requests r ON r.request_id = ri.request_id
+                WHERE ri.item_id = ?
+                LIMIT 1
+                FOR UPDATE");
+        } else {
+            $current_stmt = $conn->prepare("SELECT
+                    ri.is_collected,
+                    COALESCE(ri.is_cancelled, 0) AS is_cancelled,
+                    ri.book_id,
+                    r.semester_id,
+                    r.admin_id
+                FROM request_items ri
+                JOIN requests r ON r.request_id = ri.request_id
+                WHERE ri.item_id = ? AND r.admin_id = ?
+                LIMIT 1
+                FOR UPDATE");
+        }
+
+        $current_result = false;
+        if ($current_stmt) {
+            if ($is_super_admin) {
+                $current_stmt->bind_param('i', $item_id);
+            } else {
+                $current_stmt->bind_param('ii', $item_id, $current_admin_id);
+            }
+            $current_stmt->execute();
+            $current_result = $current_stmt->get_result();
+            if ($current_result && $current_result->num_rows === 1) {
+                $current_row = $current_result->fetch_assoc();
+                $current_status = intval($current_row['is_collected'] ?? 0);
+                $is_cancelled = intval($current_row['is_cancelled'] ?? 0);
+                $book_id = intval($current_row['book_id'] ?? 0);
+                $request_semester_id = intval($current_row['semester_id'] ?? 0);
+                $request_admin_id = intval($current_row['admin_id'] ?? 0);
+            }
+            $current_stmt->close();
+        }
+
+        if ($is_cancelled === 1) {
+            throw new RuntimeException('Cancelled items cannot be marked as given out.');
+        }
+
+        if (!$current_result || $current_result->num_rows !== 1 || $book_id <= 0 || $request_semester_id <= 0 || $request_admin_id <= 0) {
+            throw new RuntimeException('You do not have permission to update this book item.');
+        }
+
+        if ($requested_state_raw === '0' || $requested_state_raw === '1') {
+            $new_collected_status = intval($requested_state_raw);
+        } else {
+            $new_collected_status = 1 - $current_status;
+        }
+
+        if ($new_collected_status === $current_status) {
+            $new_status = $current_status;
+            $conn->commit();
+            if ($is_ajax) {
+                toggle_book_json_response([
+                    'success' => true,
+                    'item_id' => $item_id,
+                    'is_collected' => $new_status,
+                    'new_status' => $new_status === 1 ? 'given_out' : 'pending',
+                    'message' => 'Book status unchanged',
+                ]);
+            }
+            header("Location: view_request.php");
             exit;
         }
-        header("Location: view_request.php?msg=cancelled_item");
-        exit;
-    }
 
-    // Toggle is_collected and set/clear received_at accordingly
-    $new_collected_status = 1 - $current_status;
-    if ($new_collected_status === 1) {
-        // Marking as collected - set received_at to NOW()
-        if ($is_super_admin) {
+        if ($new_collected_status === 1) {
             $stmt = $conn->prepare("UPDATE request_items SET is_collected = 1, received_at = NOW() WHERE item_id = ?");
         } else {
-            $stmt = $conn->prepare("UPDATE request_items ri JOIN requests r ON r.request_id = ri.request_id SET ri.is_collected = 1, ri.received_at = NOW() WHERE ri.item_id = ? AND r.admin_id = ?");
-        }
-    } else {
-        // Unmarking as collected - clear received_at
-        if ($is_super_admin) {
             $stmt = $conn->prepare("UPDATE request_items SET is_collected = 0, received_at = NULL WHERE item_id = ?");
-        } else {
-            $stmt = $conn->prepare("UPDATE request_items ri JOIN requests r ON r.request_id = ri.request_id SET ri.is_collected = 0, ri.received_at = NULL WHERE ri.item_id = ? AND r.admin_id = ?");
         }
-    }
-    
-    if ($stmt) {
-        if ($is_super_admin) {
-            $stmt->bind_param('i', $item_id);
-        } else {
-            $stmt->bind_param('ii', $item_id, $current_admin_id);
-        }
-        $stmt->execute();
-        $result = ($stmt->affected_rows >= 0);
-    } else {
+
         $result = false;
-    }
-
-    if (!$result) {
-        if (isset($_POST['ajax'])) {
-            header('Content-Type: application/json');
-            echo json_encode(['success' => false, 'error' => 'Toggle failed']);
-            exit;
+        if ($stmt) {
+            $stmt->bind_param('i', $item_id);
+            $result = $stmt->execute();
+            $stmt->close();
         }
-        header("Location: view_request.php?msg=toggle_failed");
+
+        if (!$result) {
+            throw new RuntimeException('Could not update book status. Please try again.');
+        }
+
+        $new_status = $new_collected_status;
+        $conn->commit();
+    } catch (Throwable $e) {
+        $conn->rollback();
+        if ($is_ajax) {
+            $errorMessage = $e->getMessage() !== '' ? $e->getMessage() : 'Could not update book status. Please try again.';
+            toggle_book_json_response([
+                'success' => false,
+                'error' => $errorMessage,
+                'message' => $errorMessage,
+                'stock_remaining' => $stock_remaining === null ? null : max(0, intval($stock_remaining)),
+            ]);
+        }
+        $redirectMsg = ($e->getMessage() === 'This book is out of stock. Please record more copies received before giving it out.')
+            ? 'out_of_stock'
+            : 'toggle_failed';
+        header("Location: view_request.php?msg=" . urlencode($redirectMsg));
         exit;
-    }
-
-    // Get new status
-    if ($is_super_admin) {
-        $status_stmt = $conn->prepare("SELECT is_collected FROM request_items WHERE item_id = ?");
-        if ($status_stmt) {
-            $status_stmt->bind_param('i', $item_id);
-            $status_stmt->execute();
-            $status_result = $status_stmt->get_result();
-        } else {
-            $status_result = false;
-        }
-    } else {
-        $status_stmt = $conn->prepare("SELECT ri.is_collected FROM request_items ri JOIN requests r ON r.request_id = ri.request_id WHERE ri.item_id = ? AND r.admin_id = ?");
-        if ($status_stmt) {
-            $status_stmt->bind_param('ii', $item_id, $current_admin_id);
-            $status_stmt->execute();
-            $status_result = $status_stmt->get_result();
-        } else {
-            $status_result = false;
-        }
-    }
-
-    $new_status = 0;
-    if ($status_result && $status_result->num_rows === 1) {
-        $new_status = intval($status_result->fetch_assoc()['is_collected']);
+    } finally {
+        mysqli_report(MYSQLI_REPORT_OFF);
     }
 
     if (function_exists('book_system_audit_log')) {
@@ -163,10 +194,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['item_id'])) {
         ]);
     }
 
-    if (isset($_POST['ajax'])) {
-        header('Content-Type: application/json');
-        echo json_encode(['success' => true, 'is_collected' => $new_status]);
-        exit;
+    if ($is_ajax) {
+        toggle_book_json_response([
+            'success' => true,
+            'item_id' => $item_id,
+            'is_collected' => $new_status,
+            'new_status' => $new_status === 1 ? 'given_out' : 'pending',
+            'message' => 'Book status updated',
+        ]);
     }
 
     header("Location: view_request.php");

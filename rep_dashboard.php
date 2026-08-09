@@ -10,6 +10,7 @@ if (file_exists(__DIR__ . '/setup_tasks.php')) {
         book_system_setup_ensure_column($conn, 'admins', 'subscription_active', 'TINYINT(1) NOT NULL DEFAULT 0 AFTER trial_expires_at');
         book_system_setup_ensure_column($conn, 'admins', 'subscription_started_at', 'DATETIME NULL AFTER subscription_active');
         book_system_setup_ensure_column($conn, 'admins', 'subscription_expires_at', 'DATETIME NULL AFTER subscription_started_at');
+        book_system_setup_ensure_column($conn, 'admins', 'index_number', 'VARCHAR(50) NULL AFTER class_name');
         book_system_setup_ensure_column($conn, 'admins', 'profile_photo_path', 'VARCHAR(255) NULL AFTER public_display_name');
     }
 }
@@ -42,6 +43,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['leave_workspace']) &&
     exit;
 }
 
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['return_admin_workspace']) && !empty($access_context['is_own_rep_mode'])) {
+    if (!csrf_validate($_POST['csrf_token'] ?? null)) {
+        header('Location: rep_dashboard.php?msg=csrf_invalid');
+        exit;
+    }
+    $_SESSION['super_admin_data_scope'] = 'own';
+    $_SESSION['super_admin_workspace_mode'] = 'admin';
+    unset($_SESSION['super_admin_rep_context_id']);
+    header("Location: admin.php");
+    exit;
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['logout'])) {
     if (!csrf_validate($_POST['csrf_token'] ?? null)) {
         header('Location: rep_dashboard.php?msg=csrf_invalid');
@@ -56,28 +69,62 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['logout'])) {
 $current_admin_id = intval($access_context['effective_admin_id'] ?? 0);
 $current_admin_class = strval($access_context['effective_class_name'] ?? '');
 $current_admin_name = strval($access_context['effective_full_name'] ?? $access_context['effective_username'] ?? 'Rep');
+$actor_is_assistant = !empty($access_context['is_assistant_mode']);
+$workspace_actor_name = trim(strval($actor_is_assistant ? ($access_context['actor_full_name'] ?? $access_context['actor_username'] ?? '') : $current_admin_name));
 $viewing_workspace = !empty($access_context['is_workspace_mode']);
+$viewing_own_rep_workspace = !empty($access_context['is_own_rep_mode']);
 $profile_photo_path = '';
-$profile_initials = strtoupper(substr(preg_replace('/[^A-Za-z0-9]/', '', $current_admin_name), 0, 2));
+$rep_index_number = '';
+$dashboard_msg = trim(strval($_GET['msg'] ?? ''));
+$profile_initials = strtoupper(substr(preg_replace('/[^A-Za-z0-9]/', '', $workspace_actor_name !== '' ? $workspace_actor_name : $current_admin_name), 0, 2));
 if ($profile_initials === '') {
     $profile_initials = 'RP';
 }
-$profile_stmt = $conn->prepare("SELECT profile_photo_path FROM admins WHERE admin_id = ?");
+$profile_stmt = $conn->prepare("SELECT profile_photo_path, index_number FROM admins WHERE admin_id = ?");
 if ($profile_stmt) {
     $profile_stmt->bind_param('i', $current_admin_id);
     $profile_stmt->execute();
-    $profile_stmt->bind_result($profile_photo_path_result);
+    $profile_stmt->bind_result($profile_photo_path_result, $rep_index_number_result);
     if ($profile_stmt->fetch()) {
         $profile_photo_path = trim(strval($profile_photo_path_result ?? ''));
+        $rep_index_number = trim(strval($rep_index_number_result ?? ''));
     }
     $profile_stmt->close();
+}
+if ($actor_is_assistant) {
+    $profile_photo_path = trim(strval($access_context['actor_profile_photo_path'] ?? ''));
+    if ($workspace_actor_name === '') {
+        header('Location: my_profile.php?setup=1');
+        exit;
+    }
 }
 $rep_access_status = ($session_role === 'rep' && function_exists('book_system_get_rep_access_status'))
     ? book_system_get_rep_access_status($conn, $current_admin_id)
     : [];
+$rep_rollout_notice = ($session_role === 'rep' && function_exists('book_system_get_rep_rollout_notice'))
+    ? book_system_get_rep_rollout_notice($conn)
+    : ['show' => false];
 
 // Fetch rep's stats
 $semester_id = isset($ACTIVE_SEMESTER_ID) ? intval($ACTIVE_SEMESTER_ID) : 0;
+if ($semester_id <= 0 && function_exists('book_system_get_active_semester_id')) {
+    $semester_id = book_system_get_active_semester_id($conn);
+}
+
+if (($session_role === 'rep' && !$viewing_workspace) || $viewing_own_rep_workspace) {
+    $book_count_stmt = $conn->prepare("SELECT COUNT(*) AS total_books FROM books WHERE admin_id = ? AND semester_id = ?");
+    if ($book_count_stmt) {
+        $book_count_stmt->bind_param('ii', $current_admin_id, $semester_id);
+        $book_count_stmt->execute();
+        $book_count_row = $book_count_stmt->get_result()->fetch_assoc();
+        $book_count_stmt->close();
+        if (intval($book_count_row['total_books'] ?? 0) === 0) {
+            header('Location: manage_books.php?msg=book_setup_required');
+            exit;
+        }
+    }
+}
+
 $total_collected = 0.0;
 $paid_to_lecturers = 0.0;
 $total_pending = 0;
@@ -120,21 +167,51 @@ if (!empty($dashboard_metrics)) {
 $today_date = date('Y-m-d');
 $unseen_request_count = 0;
 $today_request_count = 0;
-$notification_stmt = $conn->prepare("SELECT
-        SUM(CASE WHEN rep_viewed_at IS NULL THEN 1 ELSE 0 END) AS unseen_requests,
-        SUM(CASE WHEN DATE(created_at) = ? THEN 1 ELSE 0 END) AS today_requests
-    FROM requests
-    WHERE semester_id = ? AND admin_id = ?");
-if ($notification_stmt) {
-    $notification_stmt->bind_param('sii', $today_date, $semester_id, $current_admin_id);
-    $notification_stmt->execute();
-    $notification_res = $notification_stmt->get_result();
-    if ($notification_res && $notification_res->num_rows === 1) {
-        $notification_row = $notification_res->fetch_assoc();
-        $unseen_request_count = intval($notification_row['unseen_requests'] ?? 0);
-        $today_request_count = intval($notification_row['today_requests'] ?? 0);
+$class_list_count = 0;
+$dashboardCountersLoader = static function () use ($conn, $today_date, $semester_id, $current_admin_id): array {
+    $counters = [
+        'unseen_request_count' => 0,
+        'today_request_count' => 0,
+        'class_list_count' => 0,
+    ];
+
+    $notification_stmt = $conn->prepare("SELECT
+            SUM(CASE WHEN rep_viewed_at IS NULL THEN 1 ELSE 0 END) AS unseen_requests,
+            SUM(CASE WHEN DATE(created_at) = ? THEN 1 ELSE 0 END) AS today_requests
+        FROM requests
+        WHERE semester_id = ? AND admin_id = ?");
+    if ($notification_stmt) {
+        $notification_stmt->bind_param('sii', $today_date, $semester_id, $current_admin_id);
+        $notification_stmt->execute();
+        $notification_res = $notification_stmt->get_result();
+        if ($notification_res && $notification_res->num_rows === 1) {
+            $notification_row = $notification_res->fetch_assoc();
+            $counters['unseen_request_count'] = intval($notification_row['unseen_requests'] ?? 0);
+            $counters['today_request_count'] = intval($notification_row['today_requests'] ?? 0);
+        }
+        $notification_stmt->close();
     }
-    $notification_stmt->close();
+
+    $class_list_stmt = $conn->prepare("SELECT COUNT(*) AS total_students FROM class_students WHERE admin_id = ? AND semester_id = ?");
+    if ($class_list_stmt) {
+        $class_list_stmt->bind_param('ii', $current_admin_id, $semester_id);
+        $class_list_stmt->execute();
+        $class_list_row = $class_list_stmt->get_result()->fetch_assoc();
+        $counters['class_list_count'] = intval($class_list_row['total_students'] ?? 0);
+        $class_list_stmt->close();
+    }
+
+    return $counters;
+};
+
+$dashboardCounters = function_exists('cache_get')
+    ? cache_get('rep_dashboard_counters_v1_' . $current_admin_id . '_' . $semester_id . '_' . md5($today_date), 20, $dashboardCountersLoader)
+    : $dashboardCountersLoader();
+
+if (is_array($dashboardCounters)) {
+    $unseen_request_count = intval($dashboardCounters['unseen_request_count'] ?? 0);
+    $today_request_count = intval($dashboardCounters['today_request_count'] ?? 0);
+    $class_list_count = intval($dashboardCounters['class_list_count'] ?? 0);
 }
 
 $chart_max_value = 1;
@@ -147,6 +224,95 @@ foreach ($semester_chart_rows as $chart_row) {
         intval($chart_row['pending_items'] ?? 0)
     );
 }
+
+$rep_meta_summary = trim($current_admin_class ?: 'Class Representative');
+if ($active_semester_label !== '') {
+    $rep_meta_summary .= ' • ' . $active_semester_label;
+}
+
+$chart_current = $semester_chart_rows[0] ?? [];
+$chart_previous = $semester_chart_rows[1] ?? [];
+
+$dashboard_change_formatter = static function (float $current, float $previous) : array {
+    if ($previous <= 0) {
+        return ['show' => false, 'text' => '', 'class' => 'neutral'];
+    }
+
+    $delta = (($current - $previous) / max(abs($previous), 0.01)) * 100;
+    $class = $delta >= 0 ? 'up' : 'down';
+    $sign = $delta >= 0 ? '↑ ' : '↓ ';
+
+    return [
+        'show' => true,
+        'text' => $sign . number_format(abs($delta), 0) . '% vs last week',
+        'class' => $class,
+    ];
+};
+
+$cash_change = $dashboard_change_formatter(
+    floatval($total_collected),
+    floatval($chart_previous['revenue'] ?? 0)
+);
+$balance_change = $dashboard_change_formatter(
+    floatval($net_balance),
+    floatval(($chart_previous['revenue'] ?? 0) - ($chart_previous['unpaid_balance'] ?? 0))
+);
+$unpaid_change = $dashboard_change_formatter(
+    floatval($total_pending),
+    floatval($chart_previous['pending_items'] ?? 0)
+);
+$notification_has_updates = $today_request_count > 0 || $unseen_request_count > 0;
+$reports_href = 'activity_log.php';
+$announcements_href = 'common_request_portal.php';
+$offers_href = 'common_request_portal.php?view=ads&source=rep#offersPanel';
+$share_request_href = '#shareRequestLinkPanel';
+$rep_bottom_nav_active = 'dashboard';
+$rep_bottom_nav_profile_href = 'my_profile.php';
+$utility_links = [
+    ['href' => 'manage_books.php', 'label' => 'Manage Books'],
+    ['href' => 'rep_export_data.php', 'label' => 'Download Data'],
+    ['href' => 'rep_activity_log.php', 'label' => 'Team Activity'],
+    ['href' => 'my_profile.php', 'label' => 'Profile'],
+];
+if (!$actor_is_assistant) {
+    $utility_links[] = ['href' => 'manage_assistants.php', 'label' => 'Assistant Access'];
+}
+if (!$viewing_workspace && !$viewing_own_rep_workspace && !$actor_is_assistant) {
+    $utility_links[] = ['href' => 'generate_access_code.php', 'label' => 'Workspace Access'];
+}
+
+$dashboard_refresh_state = [
+    'admin_id' => $current_admin_id,
+    'semester_id' => $semester_id,
+    'cash_collected' => round($total_collected, 2),
+    'paid_to_lecturers' => round($paid_to_lecturers, 2),
+    'net_balance' => round($net_balance, 2),
+    'pending_requests' => $total_pending,
+    'unseen_request_count' => $unseen_request_count,
+    'today_request_count' => $today_request_count,
+    'class_list_count' => $class_list_count,
+    'dashboard_msg' => $dashboard_msg,
+    'alerts' => array_map(static function (array $alert): array {
+        return [
+            'type' => strval($alert['type'] ?? ''),
+            'count' => intval($alert['count'] ?? 0),
+            'href' => strval($alert['href'] ?? ''),
+        ];
+    }, is_array($dashboard_alerts) ? $dashboard_alerts : []),
+];
+$dashboard_refresh_token = sha1(json_encode($dashboard_refresh_state, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+
+if (strval($_GET['refresh'] ?? '') === 'status') {
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+    header('Pragma: no-cache');
+    header('Expires: 0');
+    echo json_encode([
+        'success' => true,
+        'state_token' => $dashboard_refresh_token,
+    ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    exit;
+}
 ?>
 
 <!DOCTYPE html>
@@ -156,556 +322,777 @@ foreach ($semester_chart_rows as $chart_row) {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Rep Dashboard - <?php echo htmlspecialchars($current_admin_class); ?></title>
     <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { 
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
-            background: linear-gradient(135deg, #e8f5e9 0%, #c8e6c9 100%);
-            min-height: 100vh;
-            padding: 20px;
+        :root {
+            --bg: #f6f8fc;
+            --surface: #ffffff;
+            --surface-soft: #f9fbff;
+            --line: #e7edf6;
+            --text: #1f2937;
+            --muted: #6b7280;
+            --primary: #2563eb;
+            --green: #16a34a;
+            --red: #ef4444;
+            --purple: #7c3aed;
+            --orange: #f97316;
+            --shadow: 0 14px 32px rgba(15, 23, 42, 0.08);
+            --radius-xl: 24px;
+            --radius-lg: 18px;
+            --radius-md: 14px;
         }
-        
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+            background:
+                radial-gradient(circle at top, rgba(37, 99, 235, 0.08), transparent 24%),
+                linear-gradient(180deg, #ffffff 0%, var(--bg) 40%, #f3f6fb 100%);
+            color: var(--text);
+            min-height: 100vh;
+            padding: 14px 12px 116px;
+        }
+        a { color: inherit; text-decoration: none; }
+        button { font: inherit; }
         .dashboard-container {
-            max-width: 800px;
+            width: min(100%, 430px);
             margin: 0 auto;
         }
-        
-        .dashboard-header {
-            background: linear-gradient(135deg, #43a047 0%, #2e7d32 100%);
-            color: white;
-            padding: 25px;
-            border-radius: 16px;
-            margin-bottom: 20px;
-            box-shadow: 0 10px 30px rgba(46, 125, 50, 0.3);
-        }
-        .header-top {
+        .top-header {
             display: flex;
             align-items: center;
-            gap: 16px;
-            flex-wrap: wrap;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 16px;
         }
-        .header-avatar {
-            width: 78px;
-            height: 78px;
+        .header-copy {
+            flex: 1;
+            min-width: 0;
+        }
+        .header-copy h1 {
+            font-size: 15px;
+            font-weight: 800;
+            color: #111827;
+            margin-bottom: 4px;
+        }
+        .header-copy p {
+            font-size: 12px;
+            color: var(--muted);
+            line-height: 1.4;
+        }
+        .notification-link {
+            position: relative;
+            width: 40px;
+            height: 40px;
+            border-radius: 12px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(255,255,255,0.9);
+            border: 1px solid var(--line);
+            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.04);
+        }
+        .notification-link svg { color: #111827; }
+        .notification-dot {
+            position: absolute;
+            top: 8px;
+            right: 9px;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--primary);
+            box-shadow: 0 0 0 2px #fff;
+        }
+        .state-stack,
+        .content-stack {
+            display: grid;
+            gap: 14px;
+        }
+        .banner-card,
+        .profile-card,
+        .quick-actions-card,
+        .more-tools-card {
+            background: var(--surface);
+            border: 1px solid rgba(255,255,255,0.85);
+            border-radius: var(--radius-xl);
+            box-shadow: var(--shadow);
+        }
+        .banner-card {
+            padding: 15px 16px;
+            font-size: 13px;
+            line-height: 1.65;
+        }
+        .trial-banner,
+        .rollout-banner {
+            background: linear-gradient(135deg, #fff8e1 0%, #fff4cc 100%);
+            color: #8a5200;
+            border-color: rgba(245, 158, 11, 0.22);
+        }
+        .portal-warning-banner {
+            background: linear-gradient(135deg, #fff7ed 0%, #ffedd5 100%);
+            color: #9a3412;
+            border-color: rgba(249, 115, 22, 0.22);
+        }
+        .success-banner {
+            background: linear-gradient(135deg, #ecfdf3 0%, #dcfce7 100%);
+            color: #166534;
+            border-color: rgba(34, 197, 94, 0.22);
+        }
+        .trial-banner strong,
+        .rollout-banner strong {
+            display: block;
+            margin-bottom: 4px;
+            font-size: 14px;
+        }
+        .profile-card {
+            background: linear-gradient(135deg, #f9fbff 0%, #edf4ff 100%);
+            border-color: #dbe7ff;
+            padding: 14px;
+        }
+        .profile-main {
+            display: grid;
+            grid-template-columns: 92px 1fr;
+            gap: 14px;
+            align-items: center;
+        }
+        .profile-avatar {
+            width: 92px;
+            height: 92px;
             border-radius: 50%;
             overflow: hidden;
+            border: 3px solid rgba(255,255,255,0.95);
+            background: #dbeafe;
+            box-shadow: 0 10px 22px rgba(37, 99, 235, 0.16);
             display: flex;
             align-items: center;
             justify-content: center;
-            flex-shrink: 0;
-            border: 3px solid rgba(255,255,255,0.32);
-            background: rgba(255,255,255,0.16);
-            box-shadow: 0 12px 28px rgba(0,0,0,0.18);
             font-size: 26px;
             font-weight: 800;
-            letter-spacing: 0.04em;
-            color: #ffffff;
+            color: var(--primary);
             background-size: cover;
             background-position: center;
         }
-        .header-avatar.has-photo { color: transparent; }
-        .header-copy { min-width: 0; }
-        .dashboard-header h1 { font-size: 24px; font-weight: 600; }
-        .dashboard-header .subtitle { opacity: 0.9; margin-top: 5px; font-size: 14px; }
-        .header-actions {
-            display: flex;
-            justify-content: flex-end;
+        .profile-avatar.has-photo { color: transparent; }
+        .profile-copy h2 {
+            font-size: 15px;
+            line-height: 1.3;
+            font-weight: 800;
+            color: #111827;
+        }
+        .profile-badge {
+            display: inline-flex;
             align-items: center;
-            margin-top: 15px;
+            gap: 6px;
+            margin-top: 8px;
+            padding: 6px 10px;
+            border-radius: 999px;
+            background: rgba(37, 99, 235, 0.12);
+            color: var(--primary);
+            font-size: 11px;
+            font-weight: 700;
+        }
+        .profile-lines {
+            margin-top: 10px;
+            display: grid;
+            gap: 7px;
+        }
+        .profile-line {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            color: #374151;
+            font-size: 12px;
+            line-height: 1.45;
+        }
+        .profile-line svg {
+            color: var(--primary);
+            flex-shrink: 0;
+            margin-top: 1px;
+        }
+        .workspace-actions {
+            margin-top: 12px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .workspace-button {
+            border: 1px solid #d6e3ff;
+            background: rgba(255,255,255,0.88);
+            color: #1d4ed8;
+            padding: 10px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 700;
+            cursor: pointer;
+        }
+        .section-title {
+            font-size: 15px;
+            font-weight: 800;
+            color: #111827;
+            margin: 6px 4px 2px;
+        }
+        .quick-actions-card,
+        .more-tools-card {
+            padding: 14px;
+        }
+        .quick-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 12px;
+        }
+        .quick-action {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            background: var(--surface-soft);
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            padding: 14px;
+            min-height: 148px;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.9);
+            text-align: center;
+        }
+        .quick-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .quick-icon svg { width: 24px; height: 24px; }
+        .quick-icon.blue { background: #eef4ff; color: var(--primary); }
+        .quick-icon.green { background: #ecfdf3; color: var(--green); }
+        .quick-icon.purple { background: #f5f3ff; color: var(--purple); }
+        .quick-icon.orange { background: #fff7ed; color: var(--orange); }
+        .quick-icon.amber { background: #fff8e6; color: #d97706; }
+        .quick-icon.rose { background: #fff1f2; color: #fb7185; }
+        .quick-icon.teal { background: #ecfeff; color: #0f766e; }
+        .quick-copy h3 {
+            font-size: 13px;
+            font-weight: 800;
+            color: #111827;
+            margin-bottom: 6px;
+        }
+        .quick-copy p {
+            font-size: 11px;
+            color: var(--muted);
+            line-height: 1.45;
+        }
+        .quick-arrow {
+            color: #9ca3af;
+            flex-shrink: 0;
+            align-self: center;
+        }
+        .share-link-card {
+            padding: 16px;
+            display: none;
+            gap: 12px;
+        }
+        .share-link-card.is-open {
+            display: grid;
+        }
+        .share-link-copy {
+            display: grid;
+            gap: 4px;
+        }
+        .share-link-copy h3 {
+            font-size: 14px;
+            font-weight: 800;
+            color: #111827;
+        }
+        .share-link-copy p {
+            font-size: 12px;
+            color: var(--muted);
+            line-height: 1.45;
+        }
+        .share-link-shell {
+            border: 1px solid #dbe7ff;
+            background: #f8fbff;
+            border-radius: 16px;
+            padding: 12px;
+            font-size: 12px;
+            color: #1d4ed8;
+            word-break: break-all;
+        }
+        .share-link-actions {
+            display: flex;
             flex-wrap: wrap;
             gap: 10px;
         }
-        .logout-btn {
-            background: rgba(255,255,255,0.2);
-            color: white;
-            padding: 10px 20px;
-            border-radius: 8px;
-            text-decoration: none;
-            font-weight: 600;
-            transition: all 0.3s;
-            border: 1px solid rgba(255,255,255,0.3);
-        }
-        .logout-btn:hover { background: rgba(255,255,255,0.3); }
-        
-        .notification-link {
-            position: relative;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            width: 46px;
-            height: 46px;
-            border-radius: 50%;
-            background: rgba(255,255,255,0.18);
-            color: white;
-            text-decoration: none;
-            border: 1px solid rgba(255,255,255,0.28);
-            font-size: 22px;
-        }
-        .notification-badge {
-            position: absolute;
-            top: -4px;
-            right: -2px;
-            min-width: 22px;
-            height: 22px;
-            padding: 0 6px;
-            border-radius: 999px;
-            background: #dc2626;
-            color: white;
-            font-size: 11px;
-            font-weight: 800;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            box-shadow: 0 4px 10px rgba(0,0,0,0.18);
-        }
-        .copy-btn {
-            background: white;
-            color: #2e7d32;
-            border: none;
-            padding: 6px 12px;
-            border-radius: 5px;
+        .share-link-button {
+            border: 1px solid #dbe7ff;
+            background: #ffffff;
+            color: #1d4ed8;
+            padding: 11px 14px;
+            border-radius: 14px;
+            font-size: 12px;
+            font-weight: 700;
             cursor: pointer;
-            font-weight: 600;
-            font-size: 12px;
-        }
-        .copy-btn:hover { background: #f5f5f5; }
-        .share-spotlight {
-            background: linear-gradient(135deg, #ffffff 0%, #f0fdf4 100%);
-            border-radius: 18px;
-            padding: 20px;
-            box-shadow: 0 10px 30px rgba(46, 125, 50, 0.16);
-            margin-bottom: 20px;
-            border: 1px solid rgba(67, 160, 71, 0.16);
-            position: relative;
-            overflow: hidden;
-        }
-        .share-spotlight::before {
-            content: '';
-            position: absolute;
-            width: 180px;
-            height: 180px;
-            border-radius: 50%;
-            background: rgba(67, 160, 71, 0.08);
-            top: -80px;
-            right: -40px;
-        }
-        .share-spotlight h2 {
-            font-size: 18px;
-            color: #14532d;
-            margin-bottom: 8px;
-            position: relative;
-            z-index: 1;
-        }
-        .share-spotlight p {
-            color: #3f3f46;
-            font-size: 13px;
-            margin-bottom: 14px;
-            position: relative;
-            z-index: 1;
-        }
-        .share-spotlight-code {
-            display: block;
-            padding: 12px 14px;
-            border-radius: 12px;
-            background: #0f172a;
-            color: #f8fafc;
-            font-family: Consolas, monospace;
-            font-size: 12px;
-            word-break: break-all;
-            position: relative;
-            z-index: 1;
-        }
-        .share-spotlight-actions {
-            display: flex;
-            gap: 12px;
-            flex-wrap: wrap;
-            margin-top: 14px;
-            position: relative;
-            z-index: 1;
-        }
-        .share-action-btn {
             display: inline-flex;
             align-items: center;
             justify-content: center;
             gap: 8px;
-            padding: 11px 16px;
-            border-radius: 12px;
-            text-decoration: none;
-            font-size: 13px;
-            font-weight: 700;
-            border: none;
-            cursor: pointer;
+            min-height: 44px;
         }
-        .share-action-btn.primary {
-            background: linear-gradient(135deg, #16a34a 0%, #15803d 100%);
-            color: white;
+        .share-link-button.primary {
+            background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+            border-color: transparent;
+            color: #ffffff;
+            box-shadow: 0 12px 24px rgba(37, 99, 235, 0.18);
         }
-        .share-action-btn.secondary {
-            background: #e0f2fe;
-            color: #075985;
-        }
-        .share-action-btn:hover { opacity: 0.94; }
-        .trial-banner {
-            background: linear-gradient(135deg, #fff8e1 0%, #fff3cd 100%);
-            color: #7c4a03;
-            border: 1px solid rgba(217, 119, 6, 0.22);
-            border-radius: 18px;
-            padding: 16px 18px;
-            box-shadow: 0 8px 20px rgba(217, 119, 6, 0.10);
-            margin-bottom: 18px;
-        }
-        .trial-banner strong {
-            display: block;
-            font-size: 15px;
-            margin-bottom: 4px;
-        }
-        .trial-banner span {
-            font-size: 13px;
-            line-height: 1.6;
-        }
-        
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 15px;
-            margin-bottom: 20px;
-        }
-        @media (max-width: 500px) { .stats-grid { grid-template-columns: 1fr; } }
-        
-        .stat-card {
-            background: white;
-            padding: 20px;
-            border-radius: 12px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.08);
-            border-left: 4px solid #43a047;
-        }
-        .stat-card.blue { border-left-color: #1976d2; }
-        .stat-card.orange { border-left-color: #f57c00; }
-        .stat-card.red { border-left-color: #d32f2f; }
-        
-        .stat-card .label {
-            font-size: 12px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            color: #888;
-            font-weight: 600;
-            margin-bottom: 5px;
-        }
-        .stat-card .value {
-            font-size: 22px;
-            font-weight: 700;
-            color: #333;
-        }
-        
-        .menu-section {
-            background: white;
-            border-radius: 16px;
-            padding: 25px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.08);
-        }
-        .overview-grid {
-            display: grid;
-            grid-template-columns: 1.35fr 1fr;
-            gap: 16px;
-            margin-bottom: 20px;
-        }
-        .panel {
-            background: white;
-            border-radius: 16px;
-            padding: 20px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.08);
-        }
-        .panel-wide { grid-column: 1 / -1; }
-        .panel h2 {
-            font-size: 16px;
-            color: #1f2937;
-            margin-bottom: 14px;
-        }
-        .chart-group { margin-bottom: 16px; }
-        .chart-group:last-child { margin-bottom: 0; }
-        .chart-label {
-            display: flex;
-            justify-content: space-between;
-            gap: 10px;
-            font-size: 12px;
-            color: #4b5563;
-            margin-bottom: 6px;
-            font-weight: 600;
-        }
-        .chart-track {
-            height: 10px;
-            background: #e5e7eb;
-            border-radius: 999px;
-            overflow: hidden;
-            margin-bottom: 8px;
-        }
-        .chart-fill {
-            height: 100%;
-            border-radius: 999px;
-        }
-        .chart-fill.revenue { background: linear-gradient(135deg, #34d399 0%, #059669 100%); }
-        .chart-fill.unpaid { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); }
-        .chart-fill.collected { background: linear-gradient(135deg, #60a5fa 0%, #2563eb 100%); }
-        .chart-fill.pending { background: linear-gradient(135deg, #f87171 0%, #dc2626 100%); }
-        .alert-list {
-            display: grid;
-            gap: 10px;
-        }
-        .alert-banner {
-            padding: 12px 14px;
-            border-radius: 12px;
-            font-size: 13px;
-            font-weight: 600;
-        }
-        .alert-warning { background: #fff7ed; color: #9a3412; border-left: 4px solid #f59e0b; }
-        .alert-info { background: #eff6ff; color: #1d4ed8; border-left: 4px solid #3b82f6; }
-        .alert-danger { background: #fef2f2; color: #b91c1c; border-left: 4px solid #ef4444; }
-        .empty-note {
-            background: #f8fafc;
-            color: #64748b;
-            padding: 14px;
-            border-radius: 12px;
-            font-size: 13px;
-        }
-        .activity-list {
-            display: grid;
-            gap: 10px;
-        }
-        .activity-item {
-            padding: 12px 14px;
-            border-radius: 12px;
-            background: #f8fafc;
-            border: 1px solid #e5e7eb;
-        }
-        .activity-item .title {
-            font-weight: 700;
-            color: #1f2937;
+        .more-tools-card h3 {
             font-size: 14px;
+            font-weight: 800;
+            color: #111827;
+            margin-bottom: 10px;
         }
-        .activity-item .meta {
-            font-size: 12px;
-            color: #64748b;
-            margin-top: 4px;
-        }
-        .activity-item .details {
-            font-size: 12px;
-            color: #475569;
-            margin-top: 6px;
-        }
-        @media (max-width: 760px) {
-            .overview-grid { grid-template-columns: 1fr; }
-        }
-        .menu-section h2 {
-            font-size: 16px;
-            color: #333;
-            margin-bottom: 15px;
-            padding-bottom: 10px;
-            border-bottom: 2px solid #e8f5e9;
-        }
-        
-        .menu-grid {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 12px;
-        }
-        @media (max-width: 500px) { .menu-grid { grid-template-columns: 1fr; } }
-        
-        .menu-item {
+        .tools-row {
             display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .tool-chip {
+            display: inline-flex;
             align-items: center;
-            padding: 15px;
-            background: #f8f9fa;
-            border-radius: 10px;
-            text-decoration: none;
-            color: #333;
-            transition: all 0.3s;
-            border: 2px solid transparent;
+            justify-content: center;
+            min-height: 40px;
+            padding: 0 14px;
+            border-radius: 999px;
+            background: #f3f7ff;
+            border: 1px solid #dbe7ff;
+            color: var(--primary);
+            font-size: 12px;
+            font-weight: 700;
         }
-        .menu-item:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
-            border-color: #43a047;
-            background: #e8f5e9;
+        .bottom-nav-wrap {
+            position: fixed;
+            left: 50%;
+            bottom: 10px;
+            transform: translateX(-50%);
+            width: min(calc(100vw - 18px), 430px);
+            z-index: 40;
         }
-        .menu-item .icon {
-            width: 56px;
-            height: 56px;
-            border-radius: 15px;
+        .bottom-nav {
+            background: rgba(255,255,255,0.97);
+            border: 1px solid rgba(255,255,255,0.9);
+            border-radius: 24px;
+            box-shadow: 0 20px 36px rgba(15, 23, 42, 0.12);
+            padding: 10px 10px calc(10px + env(safe-area-inset-bottom, 0px));
+            display: grid;
+            grid-template-columns: repeat(5, minmax(0, 1fr));
+            align-items: end;
+            gap: 6px;
+        }
+        .bottom-nav-item {
+            display: grid;
+            justify-items: center;
+            gap: 5px;
+            font-size: 10px;
+            font-weight: 700;
+            color: #6b7280;
+            padding-top: 4px;
+        }
+        .bottom-nav-item svg {
+            width: 22px;
+            height: 22px;
+        }
+        .bottom-nav-item.active {
+            color: var(--primary);
+        }
+        .center-nav {
+            transform: translateY(-18px);
+        }
+        .center-nav .center-button {
+            width: 54px;
+            height: 54px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+            color: white;
             display: flex;
             align-items: center;
             justify-content: center;
-            font-size: 26px;
-            margin-right: 12px;
-            background: #e8f5e9;
-            box-shadow: inset 0 1px 0 rgba(255,255,255,0.75), 0 8px 18px rgba(15, 23, 42, 0.08);
+            box-shadow: 0 16px 28px rgba(37, 99, 235, 0.28);
+            margin-bottom: 4px;
         }
-        .menu-item .text h3 { font-size: 14px; font-weight: 600; margin-bottom: 2px; }
-        .menu-item .text p { font-size: 11px; color: #888; }
-        
-        @media (max-width: 640px) {
-            .header-top { align-items: flex-start; }
-            .header-avatar {
-                width: 70px;
-                height: 70px;
-                font-size: 22px;
+        .center-nav .center-button svg {
+            width: 22px;
+            height: 22px;
+        }
+        .center-nav span:last-child {
+            color: var(--primary);
+        }
+        @media (min-width: 760px) {
+            body {
+                padding: 22px 18px 128px;
             }
-            .share-action-btn { width: 100%; }
+            .dashboard-container {
+                width: min(100%, 780px);
+            }
+            .top-header {
+                margin-bottom: 18px;
+            }
+            .profile-card,
+            .quick-actions-card,
+            .more-tools-card {
+                padding: 18px;
+            }
+            .quick-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+            .bottom-nav-wrap {
+                width: min(calc(100vw - 24px), 520px);
+            }
+        }
+        @media (max-width: 360px) {
+            .profile-main {
+                grid-template-columns: 1fr;
+                text-align: center;
+            }
+            .profile-avatar {
+                margin: 0 auto;
+            }
+            .quick-grid {
+                grid-template-columns: 1fr;
+            }
         }
     </style>
 </head>
 <body>
 
 <div class="dashboard-container">
-    <div class="dashboard-header">
-        <div class="header-top">
-            <div
-                class="header-avatar<?php echo $profile_photo_path !== '' ? ' has-photo' : ''; ?>"
-                <?php if ($profile_photo_path !== ''): ?>
-                    style="background-image:url('<?php echo htmlspecialchars($profile_photo_path, ENT_QUOTES); ?>');"
-                <?php endif; ?>
-            ><?php echo htmlspecialchars($profile_initials); ?></div>
-            <div class="header-copy">
-                <h1>Welcome, <?php echo htmlspecialchars($current_admin_name); ?></h1>
-                <p class="subtitle">Class: <?php echo htmlspecialchars($current_admin_class ?: 'Class Representative'); ?><?php echo $active_semester_label ? ' &bull; ' . htmlspecialchars($active_semester_label) : ''; ?></p>
-                <?php if ($viewing_workspace): ?>
-                    <p class="subtitle" style="margin-top:8px; font-weight:600;">Super admin workspace view for this rep is active.</p>
-                <?php endif; ?>
+    <header class="top-header">
+        <div class="header-copy">
+            <h1><?php echo $actor_is_assistant ? 'Assistant Workspace' : 'Rep Dashboard'; ?></h1>
+            <p><?php echo $actor_is_assistant ? 'Handle class activity on behalf of ' . htmlspecialchars($current_admin_name) : 'Overview of your class activity'; ?></p>
+        </div>
+        <a href="view_request.php?notification_view=1&request_day=<?php echo urlencode($today_date); ?>" class="notification-link" title="Open request notifications">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M15 17H9a2 2 0 0 1-2-2v-4.5a5 5 0 1 1 10 0V15a2 2 0 0 1-2 2Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+                <path d="M10 19a2 2 0 0 0 4 0" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+            </svg>
+            <?php if ($notification_has_updates): ?><span class="notification-dot"></span><?php endif; ?>
+        </a>
+    </header>
+
+    <div class="state-stack">
+        <?php if ($dashboard_msg === 'workspace_reset_success'): ?>
+        <div class="banner-card success-banner">
+            <strong>Workspace reset successfully</strong>
+            <span>You can now upload a new class list and start fresh for the active semester.</span>
+        </div>
+        <?php endif; ?>
+        <?php if (!empty($rep_rollout_notice['show'])): ?>
+        <div class="banner-card rollout-banner">
+            <strong>Free access is ending soon</strong>
+            <span><?php echo htmlspecialchars(strval($rep_rollout_notice['message'] ?? '')); ?></span>
+        </div>
+        <?php endif; ?>
+
+        <?php if (!empty($rep_access_status['is_trial_expiring_soon'])): ?>
+        <div class="banner-card trial-banner">
+            <strong>Free trial ending soon</strong>
+            <span>
+                <?php echo htmlspecialchars(strval($rep_access_status['reminder_message'] ?? 'Your free trial will expire soon.')); ?>
+                Please make arrangements to subscribe before access stops at 12:00 AM on
+                <?php echo htmlspecialchars(date('M d, Y', strtotime(strval($rep_access_status['trial_expires_at'] ?? 'now')))); ?>.
+            </span>
+        </div>
+        <?php endif; ?>
+
+        <?php if ($class_list_count <= 0): ?>
+        <div class="banner-card portal-warning-banner">
+            <strong>Upload your class list for the active semester</strong>
+            <span>Your class list has not been uploaded for the active semester. Your class members cannot find you on the Common Request Portal until you upload it.</span>
+        </div>
+        <?php endif; ?>
+
+        <section class="profile-card">
+            <div class="profile-main">
+                <div
+                    class="profile-avatar<?php echo $profile_photo_path !== '' ? ' has-photo' : ''; ?>"
+                    <?php if ($profile_photo_path !== ''): ?>
+                        style="background-image:url('<?php echo htmlspecialchars($profile_photo_path, ENT_QUOTES); ?>');"
+                    <?php endif; ?>
+                ><?php echo htmlspecialchars($profile_initials); ?></div>
+                <div class="profile-copy">
+                    <h2>Welcome back, <?php echo htmlspecialchars($actor_is_assistant ? $workspace_actor_name : $current_admin_name); ?>!</h2>
+                    <span class="profile-badge">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="m12 2 2.7 5.48L21 8.27l-4.5 4.39 1.06 6.19L12 16l-5.56 2.85 1.06-6.19L3 8.27l6.3-.79L12 2Z"/></svg>
+                        <?php echo $actor_is_assistant ? 'Assistant Rep' : 'Class Representative'; ?>
+                    </span>
+                    <div class="profile-lines">
+                        <?php if ($actor_is_assistant): ?>
+                        <div class="profile-line">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 12h16M12 4v16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+                            <span><strong>Working Under:</strong> <?php echo htmlspecialchars($current_admin_name); ?></span>
+                        </div>
+                        <?php endif; ?>
+                        <div class="profile-line">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 19a6 6 0 1 1 12 0" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="8" r="4" stroke="currentColor" stroke-width="1.8"/></svg>
+                            <span><strong>Class:</strong> <?php echo htmlspecialchars($current_admin_class ?: 'Class Representative'); ?></span>
+                        </div>
+                        <?php if (!$actor_is_assistant && $rep_index_number !== ''): ?>
+                        <div class="profile-line">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="2" stroke="currentColor" stroke-width="1.8"/><path d="M8 9h8M8 13h5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+                            <span><strong>Index Number:</strong> <?php echo htmlspecialchars($rep_index_number); ?></span>
+                        </div>
+                        <?php endif; ?>
+                    </div>
+                </div>
             </div>
-        </div>
-        
-        <div class="header-actions">
-            <a href="view_request.php?notification_view=1&request_day=<?php echo urlencode($today_date); ?>" class="notification-link" title="Today's requests">
-                &#128276;
-                <?php if ($today_request_count > 0): ?>
-                    <span class="notification-badge"><?php echo $today_request_count > 99 ? '99+' : $today_request_count; ?></span>
+            <div class="workspace-actions">
+                <?php if ($viewing_workspace): ?>
+                <form method="POST" style="margin:0;">
+                    <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
+                    <button type="submit" name="leave_workspace" value="1" class="workspace-button">Leave Workspace</button>
+                </form>
+                <?php elseif ($viewing_own_rep_workspace): ?>
+                <form method="POST" style="margin:0;">
+                    <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
+                    <button type="submit" name="return_admin_workspace" value="1" class="workspace-button">Return to Admin Workspace</button>
+                </form>
                 <?php endif; ?>
-            </a>
-            <?php if ($viewing_workspace): ?>
-            <form method="POST" style="margin:0;">
-                <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
-                <button type="submit" name="leave_workspace" value="1" class="logout-btn">Leave Workspace</button>
-            </form>
-            <?php endif; ?>
-            <form method="POST" style="margin:0;">
-                <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
-                <button type="submit" name="logout" value="1" class="logout-btn">Logout</button>
-            </form>
-        </div>
+                <form method="POST" style="margin:0;">
+                    <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
+                    <button type="submit" name="logout" value="1" class="workspace-button">Logout</button>
+                </form>
+                <a href="common_request_portal.php" class="workspace-button">Portal</a>
+            </div>
+        </section>
     </div>
 
-    <?php if (!empty($rep_access_status['is_trial_expiring_soon'])): ?>
-    <div class="trial-banner">
-        <strong>Free trial ending soon</strong>
-        <span>
-            <?php echo htmlspecialchars(strval($rep_access_status['reminder_message'] ?? 'Your free trial will expire soon.')); ?>
-            Please make arrangements to subscribe before access stops at 12:00 AM on
-            <?php echo htmlspecialchars(date('M d, Y', strtotime(strval($rep_access_status['trial_expires_at'] ?? 'now')))); ?>.
-        </span>
-    </div>
-    <?php endif; ?>
+    <h2 class="section-title">Quick Actions</h2>
+    <section class="quick-actions-card">
+        <div class="quick-grid">
+            <a href="manage_books.php" class="quick-action">
+                <div class="quick-icon blue">
+                    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 19a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7l-5-4H6a2 2 0 0 0-2 2v14Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M9 10h6M9 14h6M9 18h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+                </div>
+                <div class="quick-copy">
+                    <h3>Add Books</h3>
+                    <p>Add or manage course materials</p>
+                </div>
+                <svg class="quick-arrow" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m9 6 6 6-6 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </a>
 
-    <div class="share-spotlight">
-        <h2>Share Your Class Request Link</h2>
-        <p>Keep this link handy anytime your class needs to place requests. You can also download your full rep data as a manual backup.</p>
-        <code class="share-spotlight-code" id="orderLink"><?php echo htmlspecialchars($public_order_link); ?></code>
-        <div class="share-spotlight-actions">
-            <button type="button" class="share-action-btn primary" onclick="copyLink()">&#128203; Copy Class Link</button>
-            <a href="rep_export_data.php" class="share-action-btn secondary">&#128229; Download My Data</a>
-        </div>
-    </div>
+            <a href="upload_class.php" class="quick-action">
+                <div class="quick-icon purple">
+                    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 18a4 4 0 0 1 8 0M4 9a3 3 0 1 1 6 0 3 3 0 1 1-6 0Zm10-1a3 3 0 1 1 6 0 3 3 0 1 1-6 0Zm-1 10a4 4 0 0 1 8 0" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+                </div>
+                <div class="quick-copy">
+                    <h3>My Class</h3>
+                    <p>View class members</p>
+                </div>
+                <svg class="quick-arrow" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m9 6 6 6-6 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </a>
 
-    <div class="stats-grid">
-        <div class="stat-card">
-            <div class="label">Cash Collected</div>
-            <div class="value">GH&#8373; <?php echo number_format($total_collected, 2); ?></div>
-        </div>
-        <div class="stat-card blue">
-            <div class="label">Paid to Lecturers</div>
-            <div class="value">GH&#8373; <?php echo number_format($paid_to_lecturers, 2); ?></div>
-        </div>
-        <div class="stat-card orange">
-            <div class="label">Available Balance</div>
-            <div class="value">GH&#8373; <?php echo number_format($net_balance, 2); ?></div>
-        </div>
-        <div class="stat-card red">
-            <div class="label">Unpaid Requests</div>
-            <div class="value"><?php echo $total_pending; ?></div>
-        </div>
-    </div>
-    
-    <div class="menu-section">
-        <h2>Quick Actions</h2>
-        <div class="menu-grid">
-            <a href="view_request.php" class="menu-item">
-                <div class="icon">&#128228;</div>
-                <div class="text">
-                    <h3>View Requests</h3>
-                    <p>Student orders & payments</p>
+            <a href="lecturer_payments.php?tab=payment" class="quick-action">
+                <div class="quick-icon green">
+                    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="4" y="7" width="16" height="10" rx="2" stroke="currentColor" stroke-width="1.8"/><path d="M8 12h8M9 16h2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
                 </div>
+                <div class="quick-copy">
+                    <h3>Record Payment</h3>
+                    <p>Lecturer payments &amp; books</p>
+                </div>
+                <svg class="quick-arrow" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m9 6 6 6-6 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </a>
-            <a href="manage_books.php" class="menu-item">
-                <div class="icon">&#128218;</div>
-                <div class="text">
-                    <h3>Manage Books</h3>
-                    <p>Add, edit prices & availability</p>
+
+            <a href="rep_activity_log.php" class="quick-action">
+                <div class="quick-icon blue">
+                    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M8 7h10M8 12h10M8 17h7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="5" cy="7" r="1.5" fill="currentColor"/><circle cx="5" cy="12" r="1.5" fill="currentColor"/><circle cx="5" cy="17" r="1.5" fill="currentColor"/></svg>
                 </div>
+                <div class="quick-copy">
+                    <h3>Team Activity</h3>
+                    <p>See who did what</p>
+                </div>
+                <svg class="quick-arrow" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m9 6 6 6-6 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </a>
-            <a href="lecturer_payments.php" class="menu-item">
-                <div class="icon">&#128176;</div>
-                <div class="text">
-                    <h3>Lecturer Payments</h3>
-                    <p>Track payments to lecturers</p>
+
+            <a href="group_draw_dashboard.php" class="quick-action">
+                <div class="quick-icon teal">
+                    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="3" stroke="currentColor" stroke-width="1.8"/><path d="M8 9h8M8 13h5M16.5 14.5l1.8 1.8 3.2-3.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
                 </div>
+                <div class="quick-copy">
+                    <h3>Group Draw</h3>
+                    <p>Run group assignments</p>
+                </div>
+                <svg class="quick-arrow" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m9 6 6 6-6 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </a>
-            <a href="admin_manual_order.php" class="menu-item">
-                <div class="icon">&#10133;</div>
-                <div class="text">
-                    <h3>Manual Order</h3>
-                    <p>Record cash payments</p>
+
+            <?php if (!$actor_is_assistant): ?>
+            <a href="manage_assistants.php" class="quick-action">
+                <div class="quick-icon purple">
+                    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="9" cy="9" r="3" stroke="currentColor" stroke-width="1.8"/><circle cx="17" cy="8" r="2.5" stroke="currentColor" stroke-width="1.8"/><path d="M4.5 19a4.5 4.5 0 0 1 9 0M14 18c.3-1.7 1.6-3 3.5-3s3.2 1.3 3.5 3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
                 </div>
-            </a>
-            <a href="upload_class.php" class="menu-item">
-                <div class="icon">&#128203;</div>
-                <div class="text">
-                    <h3>Upload Class</h3>
-                    <p>Import your class roster</p>
+                <div class="quick-copy">
+                    <h3>Assistant Access</h3>
+                    <p>Create and manage helpers</p>
                 </div>
-            </a>
-            <a href="my_profile.php" class="menu-item">
-                <div class="icon">&#128100;</div>
-                <div class="text">
-                    <h3>My Profile</h3>
-                    <p>Update payment details</p>
-                </div>
-            </a>
-            <a href="activity_log.php" class="menu-item">
-                <div class="icon">&#128221;</div>
-                <div class="text">
-                    <h3>Activity Log</h3>
-                    <p>Review your recent request and payment changes</p>
-                </div>
-            </a>
-            <?php if (!$viewing_workspace): ?>
-            <a href="generate_access_code.php" class="menu-item">
-                <div class="icon">&#128274;</div>
-                <div class="text">
-                    <h3>Workspace Access</h3>
-                    <p>Control super admin workspace sharing</p>
-                </div>
+                <svg class="quick-arrow" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m9 6 6 6-6 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </a>
             <?php endif; ?>
+
+            <a href="<?php echo htmlspecialchars($announcements_href); ?>" class="quick-action">
+                <div class="quick-icon amber">
+                    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 13V7a1 1 0 0 1 1-1h2l7-2v14l-7-2H6a1 1 0 0 1-1-1Zm2 3 1.5 3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </div>
+                <div class="quick-copy">
+                    <h3>Announcements</h3>
+                    <p>Send updates to class</p>
+                </div>
+                <svg class="quick-arrow" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m9 6 6 6-6 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </a>
+
+            <a href="<?php echo htmlspecialchars($offers_href); ?>" class="quick-action">
+                <div class="quick-icon rose">
+                    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 4 4 9l8 5 8-5-8-5Zm0 10v6m-6-3 6 3 6-3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </div>
+                <div class="quick-copy">
+                    <h3>View Ads</h3>
+                    <p>See latest ads</p>
+                </div>
+                <svg class="quick-arrow" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m9 6 6 6-6 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </a>
+
+            <a href="<?php echo htmlspecialchars($share_request_href); ?>" class="quick-action">
+                <div class="quick-icon teal">
+                    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M14 5h3a2 2 0 0 1 2 2v3M10 19H7a2 2 0 0 1-2-2v-3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="m9 12 6-6m0 0v4m0-4h-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </div>
+                <div class="quick-copy">
+                    <h3>Share Request Link</h3>
+                    <p>Copy your class request portal link</p>
+                </div>
+                <svg class="quick-arrow" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m9 6 6 6-6 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </a>
         </div>
-    </div>
+    </section>
+
+    <h2 class="section-title" id="shareRequestLinkTitle" style="display:none;">Share Request Link</h2>
+    <section class="quick-actions-card share-link-card" id="shareRequestLinkPanel">
+        <div class="share-link-copy">
+            <h3>Let your class find you faster</h3>
+            <p>Share this direct request link with your students so they can open your book request page quickly.</p>
+        </div>
+        <div class="share-link-shell" id="requestLinkValue"><?php echo htmlspecialchars($public_order_link); ?></div>
+        <div class="share-link-actions">
+            <button type="button" class="share-link-button primary" id="copyRequestLinkButton">Copy Link</button>
+            <a href="<?php echo htmlspecialchars($public_order_link); ?>" target="_blank" rel="noopener" class="share-link-button">Open Link</a>
+        </div>
+    </section>
 </div>
 
+<?php include __DIR__ . '/rep_bottom_nav.php'; ?>
+
 <script>
-function copyLink() {
-    const link = document.getElementById('orderLink').textContent.trim();
-    navigator.clipboard.writeText(link).then(() => {
-        alert('Order link copied to clipboard!');
-    }).catch(() => {
-        prompt('Copy this link:', link);
+const copyRequestLinkButton = document.getElementById('copyRequestLinkButton');
+const requestLinkValue = document.getElementById('requestLinkValue');
+const shareRequestLinkPanel = document.getElementById('shareRequestLinkPanel');
+const shareRequestLinkTitle = document.getElementById('shareRequestLinkTitle');
+const shareRequestLinkTriggers = document.querySelectorAll('a[href="#shareRequestLinkPanel"]');
+
+function openShareRequestPanel() {
+    if (!shareRequestLinkPanel || !shareRequestLinkTitle) {
+        return;
+    }
+    shareRequestLinkPanel.classList.add('is-open');
+    shareRequestLinkTitle.style.display = '';
+    shareRequestLinkTitle.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+shareRequestLinkTriggers.forEach((trigger) => {
+    trigger.addEventListener('click', (event) => {
+        event.preventDefault();
+        openShareRequestPanel();
+    });
+});
+
+if (window.location.hash === '#shareRequestLinkPanel') {
+    openShareRequestPanel();
+}
+
+if (copyRequestLinkButton && requestLinkValue) {
+    copyRequestLinkButton.addEventListener('click', async () => {
+        const linkValue = requestLinkValue.textContent.trim();
+        try {
+            if (navigator.clipboard && window.isSecureContext) {
+                await navigator.clipboard.writeText(linkValue);
+            } else {
+                const tempInput = document.createElement('textarea');
+                tempInput.value = linkValue;
+                document.body.appendChild(tempInput);
+                tempInput.select();
+                document.execCommand('copy');
+                document.body.removeChild(tempInput);
+            }
+            copyRequestLinkButton.textContent = 'Copied';
+            window.setTimeout(() => {
+                copyRequestLinkButton.textContent = 'Copy Link';
+            }, 1800);
+        } catch (error) {
+            copyRequestLinkButton.textContent = 'Copy failed';
+            window.setTimeout(() => {
+                copyRequestLinkButton.textContent = 'Copy Link';
+            }, 1800);
+        }
     });
 }
+
+(function () {
+    const refreshUrl = new URL(window.location.href);
+    refreshUrl.searchParams.set('refresh', 'status');
+    const currentStateToken = <?php echo json_encode($dashboard_refresh_token); ?>;
+    let refreshTimer = null;
+    let refreshInFlight = false;
+    let lastRefreshAt = 0;
+
+    function checkForDashboardChanges() {
+        const now = Date.now();
+        if (document.visibilityState !== 'visible') {
+            return;
+        }
+        if (refreshInFlight || (now - lastRefreshAt) < 10000) {
+            return;
+        }
+
+        refreshInFlight = true;
+        lastRefreshAt = now;
+        refreshUrl.searchParams.set('_rt', String(now));
+
+        fetch(refreshUrl.toString(), {
+            method: 'GET',
+            credentials: 'same-origin',
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest',
+                'Accept': 'application/json'
+            },
+            cache: 'no-store'
+        })
+        .then((response) => response.text())
+        .then((rawText) => {
+            const payload = JSON.parse(String(rawText || '').replace(/^\uFEFF/, ''));
+            if (payload && payload.success && payload.state_token && payload.state_token !== currentStateToken) {
+                window.location.reload();
+            }
+        })
+        .catch(() => {})
+        .finally(() => {
+            refreshInFlight = false;
+        });
+    }
+
+    refreshTimer = window.setInterval(checkForDashboardChanges, 15000);
+    window.addEventListener('focus', checkForDashboardChanges);
+    window.addEventListener('pageshow', (event) => {
+        if (event.persisted) {
+            checkForDashboardChanges();
+        }
+    });
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+            checkForDashboardChanges();
+        }
+    });
+})();
 </script>
 
 <?php include 'footer.php'; ?>

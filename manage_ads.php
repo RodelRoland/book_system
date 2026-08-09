@@ -6,10 +6,7 @@ if (file_exists(__DIR__ . '/setup_tasks.php')) {
     require_once __DIR__ . '/setup_tasks.php';
 }
 
-if (!isset($_SESSION['admin_logged_in']) || ($_SESSION['admin_role'] ?? '') !== 'super_admin') {
-    header('Location: admin.php');
-    exit;
-}
+book_system_require_admin_feature($conn, 'manage_ads');
 
 $conn->query("CREATE TABLE IF NOT EXISTS portal_ads (
     ad_id INT AUTO_INCREMENT PRIMARY KEY,
